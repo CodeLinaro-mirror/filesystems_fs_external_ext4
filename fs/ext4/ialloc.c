@@ -23,6 +23,7 @@
 #include <linux/bitops.h>
 #include <linux/blkdev.h>
 #include <linux/cred.h>
+#include <kunit/static_stub.h>
 
 #include <asm/byteorder.h>
 
@@ -953,6 +954,10 @@ struct inode *__ext4_new_inode(struct mnt_idmap *idmap,
 	struct ext4_group_info *grp = NULL;
 	bool encrypt = false;
 
+	KUNIT_STATIC_STUB_REDIRECT(__ext4_new_inode, idmap, handle, dir, mode,
+				   qstr, goal, owner, i_flags, handle_type,
+				   line_no, nblocks);
+
 	/* Cannot create files in a deleted directory */
 	if (!dir || !dir->i_nlink)
 		return ERR_PTR(-EPERM);
@@ -1630,3 +1635,7 @@ err_out:
 out:
 	return ret;
 }
+
+#if IS_ENABLED(CONFIG_EXT4_KUNIT_TESTS)
+EXPORT_SYMBOL_FOR_EXT4_TEST(__ext4_new_inode);
+#endif

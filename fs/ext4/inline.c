@@ -2016,3 +2016,7 @@ out_free:
 	brelse(iloc.bh);
 	return error;
 }
+
+#if IS_ENABLED(CONFIG_EXT4_KUNIT_TESTS)
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_find_inline_data_nolock);
+#endif
