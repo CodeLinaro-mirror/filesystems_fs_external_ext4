@@ -125,6 +125,7 @@ handle_t *__ext4_journal_start_sb(struct inode *inode,
 	return jbd2__journal_start(journal, blocks, rsv_blocks, revoke_creds,
 				   GFP_NOFS, type, line);
 }
+EXPORT_SYMBOL_FOR_EXT4_TEST(__ext4_journal_start_sb);
 
 int __ext4_journal_stop(const char *where, unsigned int line, handle_t *handle)
 {
@@ -152,6 +153,7 @@ int __ext4_journal_stop(const char *where, unsigned int line, handle_t *handle)
 		__ext4_std_error(sb, where, line, err);
 	return err;
 }
+EXPORT_SYMBOL_FOR_EXT4_TEST(__ext4_journal_stop);
 
 handle_t *__ext4_journal_start_reserved(handle_t *handle, unsigned int line,
 					int type)
