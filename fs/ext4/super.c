@@ -201,6 +201,9 @@ EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_read_bh_nowait);
 int ext4_read_bh(struct buffer_head *bh, blk_opf_t op_flags,
 		 bio_end_io_t end_io, bool simu_fail)
 {
+	KUNIT_STATIC_STUB_REDIRECT(ext4_read_bh, bh, op_flags,
+				   end_io, simu_fail);
+
 	BUG_ON(!buffer_locked(bh));
 
 	if (ext4_buffer_uptodate(bh)) {
@@ -215,6 +218,7 @@ int ext4_read_bh(struct buffer_head *bh, blk_opf_t op_flags,
 		return 0;
 	return -EIO;
 }
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_read_bh);
 
 int ext4_read_bh_lock(struct buffer_head *bh, blk_opf_t op_flags, bool wait)
 {
@@ -348,6 +352,7 @@ ext4_fsblk_t ext4_block_bitmap(struct super_block *sb,
 		(EXT4_DESC_SIZE(sb) >= EXT4_MIN_DESC_SIZE_64BIT ?
 		 (ext4_fsblk_t)le32_to_cpu(bg->bg_block_bitmap_hi) << 32 : 0);
 }
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_block_bitmap);
 
 ext4_fsblk_t ext4_inode_bitmap(struct super_block *sb,
 			       struct ext4_group_desc *bg)
@@ -356,6 +361,7 @@ ext4_fsblk_t ext4_inode_bitmap(struct super_block *sb,
 		(EXT4_DESC_SIZE(sb) >= EXT4_MIN_DESC_SIZE_64BIT ?
 		 (ext4_fsblk_t)le32_to_cpu(bg->bg_inode_bitmap_hi) << 32 : 0);
 }
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_inode_bitmap);
 
 ext4_fsblk_t ext4_inode_table(struct super_block *sb,
 			      struct ext4_group_desc *bg)
@@ -364,6 +370,7 @@ ext4_fsblk_t ext4_inode_table(struct super_block *sb,
 		(EXT4_DESC_SIZE(sb) >= EXT4_MIN_DESC_SIZE_64BIT ?
 		 (ext4_fsblk_t)le32_to_cpu(bg->bg_inode_table_hi) << 32 : 0);
 }
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_inode_table);
 
 __u32 ext4_free_group_clusters(struct super_block *sb,
 			       struct ext4_group_desc *bg)
@@ -380,6 +387,7 @@ __u32 ext4_free_inodes_count(struct super_block *sb,
 		(EXT4_DESC_SIZE(sb) >= EXT4_MIN_DESC_SIZE_64BIT ?
 		 (__u32)le16_to_cpu(READ_ONCE(bg->bg_free_inodes_count_hi)) << 16 : 0);
 }
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_free_inodes_count);
 
 __u32 ext4_used_dirs_count(struct super_block *sb,
 			      struct ext4_group_desc *bg)
@@ -388,6 +396,7 @@ __u32 ext4_used_dirs_count(struct super_block *sb,
 		(EXT4_DESC_SIZE(sb) >= EXT4_MIN_DESC_SIZE_64BIT ?
 		 (__u32)le16_to_cpu(bg->bg_used_dirs_count_hi) << 16 : 0);
 }
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_used_dirs_count);
 
 __u32 ext4_itable_unused_count(struct super_block *sb,
 			      struct ext4_group_desc *bg)
@@ -396,6 +405,7 @@ __u32 ext4_itable_unused_count(struct super_block *sb,
 		(EXT4_DESC_SIZE(sb) >= EXT4_MIN_DESC_SIZE_64BIT ?
 		 (__u32)le16_to_cpu(bg->bg_itable_unused_hi) << 16 : 0);
 }
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_itable_unused_count);
 
 void ext4_block_bitmap_set(struct super_block *sb,
 			   struct ext4_group_desc *bg, ext4_fsblk_t blk)
@@ -404,6 +414,7 @@ void ext4_block_bitmap_set(struct super_block *sb,
 	if (EXT4_DESC_SIZE(sb) >= EXT4_MIN_DESC_SIZE_64BIT)
 		bg->bg_block_bitmap_hi = cpu_to_le32(blk >> 32);
 }
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_block_bitmap_set);
 
 void ext4_inode_bitmap_set(struct super_block *sb,
 			   struct ext4_group_desc *bg, ext4_fsblk_t blk)
@@ -438,6 +449,7 @@ void ext4_free_inodes_set(struct super_block *sb,
 	if (EXT4_DESC_SIZE(sb) >= EXT4_MIN_DESC_SIZE_64BIT)
 		WRITE_ONCE(bg->bg_free_inodes_count_hi, cpu_to_le16(count >> 16));
 }
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_free_inodes_set);
 
 void ext4_used_dirs_set(struct super_block *sb,
 			  struct ext4_group_desc *bg, __u32 count)
@@ -446,6 +458,7 @@ void ext4_used_dirs_set(struct super_block *sb,
 	if (EXT4_DESC_SIZE(sb) >= EXT4_MIN_DESC_SIZE_64BIT)
 		bg->bg_used_dirs_count_hi = cpu_to_le16(count >> 16);
 }
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_used_dirs_set);
 
 void ext4_itable_unused_set(struct super_block *sb,
 			  struct ext4_group_desc *bg, __u32 count)
@@ -454,6 +467,7 @@ void ext4_itable_unused_set(struct super_block *sb,
 	if (EXT4_DESC_SIZE(sb) >= EXT4_MIN_DESC_SIZE_64BIT)
 		bg->bg_itable_unused_hi = cpu_to_le16(count >> 16);
 }
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_itable_unused_set);
 
 static void __ext4_update_tstamp(__le32 *lo, __u8 *hi, time64_t now)
 {
@@ -1152,6 +1166,7 @@ void ext4_mark_group_bitmap_corrupted(struct super_block *sb,
 		}
 	}
 }
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_mark_group_bitmap_corrupted);
 
 void ext4_update_dynamic_rev(struct super_block *sb)
 {
@@ -3332,6 +3347,7 @@ int ext4_group_desc_csum_verify(struct super_block *sb, __u32 block_group,
 
 	return 1;
 }
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_group_desc_csum_verify);
 
 void ext4_group_desc_csum_set(struct super_block *sb, __u32 block_group,
 			      struct ext4_group_desc *gdp)
@@ -3340,6 +3356,7 @@ void ext4_group_desc_csum_set(struct super_block *sb, __u32 block_group,
 		return;
 	gdp->bg_checksum = ext4_group_desc_csum(sb, block_group, gdp);
 }
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_group_desc_csum_set);
 
 /* Called at mount-time, super-block is locked */
 static int ext4_check_descriptors(struct super_block *sb,
