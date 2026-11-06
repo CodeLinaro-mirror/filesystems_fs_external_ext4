@@ -4686,6 +4686,8 @@ int ext4_truncate(struct inode *inode)
 	int err = 0, err2;
 	handle_t *handle;
 
+	KUNIT_STATIC_STUB_REDIRECT(ext4_truncate, inode);
+
 	/*
 	 * There is a possibility that we're either freeing the inode
 	 * or it's a completely new inode. In those cases we might not
