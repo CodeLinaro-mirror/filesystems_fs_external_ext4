@@ -2045,6 +2045,15 @@ int ext4_resize_fs(struct super_block *sb, ext4_fsblk_t n_blocks_count)
 	int meta_bg;
 	unsigned int flexbg_size = ext4_flex_bg_size(sbi);
 
+	/*
+	 * Reject shrinking before probing the device; this also keeps
+	 * n_blocks_count - 1 below from underflowing for n_blocks_count == 0.
+	 */
+	if (n_blocks_count < ext4_blocks_count(es)) {
+		ext4_warning(sb, "can't shrink FS - resize aborted");
+		return -EINVAL;
+	}
+
 	/* See if the device is actually as big as what was requested */
 	bh = ext4_sb_bread(sb, n_blocks_count - 1, 0);
 	if (IS_ERR(bh)) {

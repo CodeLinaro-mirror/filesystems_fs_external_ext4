@@ -1300,6 +1300,8 @@ static void test_resize_fs_across_resize_inode_to_meta_bg(struct kunit *test)
 			-ENOSPC);
 	KUNIT_EXPECT_EQ(test, ext4_resize_fs(sb, o_blks - 100), -EINVAL);
 	KUNIT_EXPECT_EQ(test, ext4_resize_fs(sb, o_blks), 0);
+	/* n_blocks_count == 0 is a shrink, not a read of block ~0ULL */
+	KUNIT_EXPECT_EQ(test, ext4_resize_fs(sb, 0), -EINVAL);
 
 	/* 2. Simultaneous resize_inode + meta_bg -> -EINVAL */
 	ext4_set_feature_meta_bg(sb);
