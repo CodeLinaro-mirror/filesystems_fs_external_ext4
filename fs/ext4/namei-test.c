@@ -84,9 +84,12 @@ struct namei_test_ctx {
 	unsigned int mark_inode_dirty_calls;
 };
 
-static const struct super_operations namei_test_sops = {};
-
 #ifdef CONFIG_QUOTA
+static struct dquot __rcu **namei_test_get_dquots(struct inode *inode)
+{
+	return EXT4_I(inode)->i_dquot;
+}
+
 static qsize_t *namei_test_get_reserved_space(struct inode *inode)
 {
 	return &EXT4_I(inode)->i_reserved_quota;
@@ -96,6 +99,12 @@ static const struct dquot_operations namei_test_qops = {
 	.get_reserved_space = namei_test_get_reserved_space,
 };
 #endif
+
+static const struct super_operations namei_test_sops = {
+#ifdef CONFIG_QUOTA
+	.get_dquots	= namei_test_get_dquots,
+#endif
+};
 
 static void init_mock_inode_slot(struct namei_test_ctx *ctx,
 				 struct mock_inode_slot *slot,
@@ -2245,6 +2254,7 @@ static void test_namei_casefold_lookup_and_strict(struct kunit *test)
 	ctx->es.s_feature_incompat |=
 		cpu_to_le32(EXT4_FEATURE_INCOMPAT_CASEFOLD);
 	ext4_set_inode_flag(dir, EXT4_INODE_CASEFOLD);
+	ext4_set_inode_flags(dir, true);
 
 	KUNIT_ASSERT_EQ(test, ext4_init_new_dir(NULL, root_dir, dir), 0);
 	init_mock_dentry(&parent_dentry, NULL, "cfdir", dir, &ctx->sb);
@@ -2261,8 +2271,8 @@ static void test_namei_casefold_lookup_and_strict(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, le32_to_cpu(de->inode), TEST_FILE1_INO);
 	brelse(bh);
 
-	/* Enable SB_STRICT_ENCODING -> invalid UTF-8 sequence is rejected */
-	ctx->sb.s_encoding_flags |= SB_STRICT_ENCODING;
+	/* Enable SB_ENC_STRICT_MODE_FL -> invalid UTF-8 sequence is rejected */
+	ctx->sb.s_encoding_flags |= SB_ENC_STRICT_MODE_FL;
 	add_dentry.__d_name = bad_utf8;
 	KUNIT_EXPECT_EQ(test,
 			ext4_add_entry_test(NULL, &add_dentry, file1),
