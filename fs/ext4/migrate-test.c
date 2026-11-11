@@ -273,7 +273,7 @@ static int migrate_mark_inode_dirty_stub(handle_t *handle, struct inode *inode,
 	return 0;
 }
 
-static struct inode *migrate_new_inode_stub(struct mnt_idmap *idmap,
+static struct inode *migrate_new_inode_stub(const struct mnt_idmap *idmap,
 					    handle_t *handle,
 					    struct inode *dir, umode_t mode,
 					    const struct qstr *qstr,
@@ -394,6 +394,7 @@ static void migrate_test_cleanup(struct migrate_test_ctx *ctx)
 
 	if (ctx->es_shrinker_inited) {
 		ext4_es_unregister_shrinker(sbi);
+		ext4_es_destroy_stats(sbi);
 		ctx->es_shrinker_inited = false;
 	}
 
@@ -459,7 +460,8 @@ static int migrate_test_init(struct kunit *test)
 	test->priv = ctx;
 
 	ctx->bdev.bd_stats = alloc_percpu(struct disk_stats);
-	KUNIT_ASSERT_NOT_NULL(test, ctx->bdev.bd_stats);
+	if (!ctx->bdev.bd_stats)
+		KUNIT_FAIL_AND_ABORT(test, "alloc_percpu failed");
 
 	ctx->bh_folio = folio_alloc(GFP_KERNEL, 0);
 	if (!ctx->bh_folio) {

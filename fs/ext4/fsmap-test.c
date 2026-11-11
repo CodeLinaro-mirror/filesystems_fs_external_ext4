@@ -217,7 +217,8 @@ static struct fsmap_test_ctx *fsmap_create_ctx(struct kunit *test,
 	ctx->data_bdev.bdev.bd_dev = FSMAP_TEST_DATADEV;
 	ctx->data_bdev.bdev.bd_mapping = &ctx->data_bdev.vfs_inode.i_data;
 	ctx->data_bdev.bdev.bd_stats = alloc_percpu(struct disk_stats);
-	KUNIT_ASSERT_NOT_NULL(test, ctx->data_bdev.bdev.bd_stats);
+	if (!ctx->data_bdev.bdev.bd_stats)
+		KUNIT_FAIL_AND_ABORT(test, "alloc_percpu failed");
 
 	inode_init_once(&ctx->log_bdev.vfs_inode);
 	address_space_init_once(&ctx->log_bdev.vfs_inode.i_data);
@@ -225,7 +226,10 @@ static struct fsmap_test_ctx *fsmap_create_ctx(struct kunit *test,
 	ctx->log_bdev.bdev.bd_dev = FSMAP_TEST_LOGDEV;
 	ctx->log_bdev.bdev.bd_mapping = &ctx->log_bdev.vfs_inode.i_data;
 	ctx->log_bdev.bdev.bd_stats = alloc_percpu(struct disk_stats);
-	KUNIT_ASSERT_NOT_NULL(test, ctx->log_bdev.bdev.bd_stats);
+	if (!ctx->log_bdev.bdev.bd_stats) {
+		free_percpu(ctx->data_bdev.bdev.bd_stats);
+		KUNIT_FAIL_AND_ABORT(test, "alloc_percpu failed");
+	}
 	ctx->log_bdev_file.f_mapping = &ctx->log_bdev.vfs_inode.i_data;
 
 	sbi = &ctx->sbi;

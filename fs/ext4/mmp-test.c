@@ -282,7 +282,8 @@ static struct mmp_test_ctx *mmp_setup_ctx(struct kunit *test)
 	KUNIT_ASSERT_EQ(test, err, 0);
 
 	ctx->bdev.bd_stats = alloc_percpu(struct disk_stats);
-	KUNIT_ASSERT_NOT_NULL(test, ctx->bdev.bd_stats);
+	if (!ctx->bdev.bd_stats)
+		KUNIT_FAIL_AND_ABORT(test, "alloc_percpu failed");
 	strscpy(ctx->bdev_disk.disk_name, "mmp_bdev",
 		sizeof(ctx->bdev_disk.disk_name));
 	ctx->bdev_disk.queue = &ctx->bdev_queue;

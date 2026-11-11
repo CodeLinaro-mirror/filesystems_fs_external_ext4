@@ -913,10 +913,12 @@ static void inode_test_cleanup(void *data)
 		ctx->ei.jinode = NULL;
 	}
 
+	ctx->sb->s_root = NULL;
 	deactivate_super(ctx->sb);
 	rcu_barrier();
 
 	ext4_es_unregister_shrinker(&ctx->sbi);
+	ext4_es_destroy_stats(&ctx->sbi);
 	percpu_counter_destroy(&ctx->sbi.s_dirtyclusters_counter);
 	percpu_counter_destroy(&ctx->sbi.s_freeclusters_counter);
 
@@ -1104,6 +1106,7 @@ static struct inode_test_ctx *inode_test_setup(struct kunit *test)
 
 	ctx->root_dentry.d_sb = sb;
 	ctx->root_dentry.d_inode = inode;
+	sb->s_root = &ctx->root_dentry;
 
 	up_write(&sb->s_umount);
 

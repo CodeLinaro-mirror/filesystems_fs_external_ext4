@@ -443,6 +443,7 @@ static void bv_test_cleanup(struct bv_test_ctx *ctx)
 
 	deactivate_super(ctx->sb);
 	ext4_es_unregister_shrinker(&ctx->sbi);
+	ext4_es_destroy_stats(&ctx->sbi);
 	rcu_barrier();
 
 	cancel_work_sync(&ctx->sbi.s_sb_upd_work);
@@ -621,6 +622,7 @@ static int bv_test_init(struct kunit *test)
 	if (!root_inode) {
 		deactivate_locked_super(sb);
 		ext4_es_unregister_shrinker(sbi);
+		ext4_es_destroy_stats(sbi);
 		rcu_barrier();
 		free_percpu(ctx->bdev.bd_stats);
 		kfree(ctx);
@@ -634,6 +636,7 @@ static int bv_test_init(struct kunit *test)
 	if (!sb->s_root) {
 		deactivate_locked_super(sb);
 		ext4_es_unregister_shrinker(sbi);
+		ext4_es_destroy_stats(sbi);
 		rcu_barrier();
 		free_percpu(ctx->bdev.bd_stats);
 		kfree(ctx);

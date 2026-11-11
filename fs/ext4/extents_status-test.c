@@ -211,8 +211,14 @@ static void es_cleanup_inode(struct inode *inode)
 
 KUNIT_DEFINE_ACTION_WRAPPER(es_cleanup_inode_action, es_cleanup_inode,
 			    struct inode *);
+static void es_cleanup_shrinker(struct ext4_sb_info *sbi)
+{
+	ext4_es_unregister_shrinker(sbi);
+	ext4_es_destroy_stats(sbi);
+}
+
 KUNIT_DEFINE_ACTION_WRAPPER(es_unregister_shrinker_action,
-			    ext4_es_unregister_shrinker,
+			    es_cleanup_shrinker,
 			    struct ext4_sb_info *);
 KUNIT_DEFINE_ACTION_WRAPPER(es_deactivate_super_action, deactivate_super,
 			    struct super_block *);

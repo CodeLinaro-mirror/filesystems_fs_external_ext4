@@ -425,6 +425,7 @@ static void mext_cleanup_ctx(void *data)
 
 	if (ctx->es_shrinker_inited) {
 		ext4_es_unregister_shrinker(&ctx->sbi);
+		ext4_es_destroy_stats(&ctx->sbi);
 		ctx->es_shrinker_inited = false;
 	}
 	if (ctx->counters_inited) {
@@ -475,7 +476,8 @@ static struct mext_test_ctx *mext_setup_ctx(struct kunit *test)
 	KUNIT_ASSERT_EQ(test, err, 0);
 
 	ctx->bdev.bd_stats = alloc_percpu(struct disk_stats);
-	KUNIT_ASSERT_NOT_NULL(test, ctx->bdev.bd_stats);
+	if (!ctx->bdev.bd_stats)
+		KUNIT_FAIL_AND_ABORT(test, "alloc_percpu failed");
 	ctx->bdev_disk.queue = &ctx->bdev_queue;
 	ctx->bdev.bd_disk = &ctx->bdev_disk;
 	ctx->bdev.bd_queue = &ctx->bdev_queue;

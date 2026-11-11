@@ -114,8 +114,8 @@ xfs_healthmon_attach(
 	}
 
 	refcount_inc(&hm->ref);
-	rcu_assign_pointer(mp->m_healthmon, hm);
 	hm->mount_cookie = (uintptr_t)mp->m_super;
+	rcu_assign_pointer(mp->m_healthmon, hm);
 	spin_unlock(&xfs_healthmon_lock);
 
 	return 0;
@@ -247,7 +247,9 @@ xfs_healthmon_merge_events(
 	case XFS_HEALTHMON_DIOWRITE:
 	case XFS_HEALTHMON_DATALOST:
 		/* logically adjacent file ranges can merge */
-		if (existing->fino != new->fino || existing->fgen != new->fgen)
+		if (existing->fino != new->fino ||
+		    existing->fgen != new->fgen ||
+		    existing->error != new->error)
 			return false;
 
 		if (existing->fpos + existing->flen == new->fpos) {

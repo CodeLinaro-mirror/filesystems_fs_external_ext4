@@ -1885,11 +1885,16 @@ err1:
 
 void ext4_es_unregister_shrinker(struct ext4_sb_info *sbi)
 {
+	shrinker_free(sbi->s_es_shrinker);
+}
+
+/* ext4_get_link() bumps the hit and miss counters in rcu pathwalk */
+void ext4_es_destroy_stats(struct ext4_sb_info *sbi)
+{
 	percpu_counter_destroy(&sbi->s_es_stats.es_stats_cache_hits);
 	percpu_counter_destroy(&sbi->s_es_stats.es_stats_cache_misses);
 	percpu_counter_destroy(&sbi->s_es_stats.es_stats_all_cnt);
 	percpu_counter_destroy(&sbi->s_es_stats.es_stats_shk_cnt);
-	shrinker_free(sbi->s_es_shrinker);
 }
 
 /*
@@ -2405,6 +2410,7 @@ EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_es_scan_range);
 EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_es_scan_clu);
 EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_es_register_shrinker);
 EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_es_unregister_shrinker);
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_es_destroy_stats);
 EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_seq_es_shrinker_info_show);
 EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_init_pending_tree);
 EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_remove_pending);

@@ -395,6 +395,7 @@ static void ind_test_cleanup(struct ind_test_ctx *ctx)
 
 	if (ctx->es_shrinker_inited) {
 		ext4_es_unregister_shrinker(sbi);
+		ext4_es_destroy_stats(sbi);
 		ctx->es_shrinker_inited = false;
 	}
 
@@ -459,7 +460,8 @@ static int ind_test_init(struct kunit *test)
 	test->priv = ctx;
 
 	ctx->bdev.bd_stats = alloc_percpu(struct disk_stats);
-	KUNIT_ASSERT_NOT_NULL(test, ctx->bdev.bd_stats);
+	if (!ctx->bdev.bd_stats)
+		KUNIT_FAIL_AND_ABORT(test, "alloc_percpu failed");
 
 	ctx->bh_folio = folio_alloc(GFP_KERNEL, 0);
 	if (!ctx->bh_folio) {

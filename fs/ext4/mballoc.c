@@ -899,10 +899,8 @@ static ext4_group_t ext4_get_allocation_groups_count(
 
 	/* non-extent files are limited to low blocks/groups */
 	if (!(ext4_test_inode_flag(ac->ac_inode, EXT4_INODE_EXTENTS)))
-		ngroups = EXT4_SB(ac->ac_sb)->s_blockfile_groups;
-
-	/* Pairs with smp_wmb() in ext4_update_super() */
-	smp_rmb();
+		/* Pairs with smp_store_release() in ext4_update_super() */
+		ngroups = smp_load_acquire(&EXT4_SB(ac->ac_sb)->s_blockfile_groups);
 
 	return ngroups;
 }
@@ -7472,8 +7470,6 @@ EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_mb_init);
 EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_get_group_desc);
 EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_count_free_clusters);
 EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_get_group_info);
-EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_free_group_clusters);
-EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_free_group_clusters_set);
 EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_get_group_no_and_offset);
 EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_get_group_number);
 EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_mb_release);

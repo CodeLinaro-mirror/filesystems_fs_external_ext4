@@ -397,7 +397,7 @@ static struct buffer_head *ext4_getblk_stub(handle_t *handle,
 	return &blk->bh;
 }
 
-static struct inode *__ext4_new_inode_stub(struct mnt_idmap *idmap,
+static struct inode *__ext4_new_inode_stub(const struct mnt_idmap *idmap,
 					   handle_t *handle,
 					   struct inode *dir, umode_t mode,
 					   const struct qstr *qstr,

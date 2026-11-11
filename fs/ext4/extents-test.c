@@ -282,6 +282,7 @@ static void extents_kunit_exit(struct kunit *test)
 	percpu_counter_destroy(&sbi->s_freeclusters_counter);
 	percpu_counter_destroy(&sbi->s_dirtyclusters_counter);
 	ext4_es_unregister_shrinker(sbi);
+	ext4_es_destroy_stats(sbi);
 	deactivate_super(sb);
 
 	kfree(k_ctx.meta_blocks);
@@ -649,6 +650,7 @@ out:
 	kfree(k_ctx.meta_blocks);
 	k_ctx.meta_blocks = NULL;
 	ext4_es_unregister_shrinker(sbi);
+	ext4_es_destroy_stats(sbi);
 out_dirtyclusters:
 	percpu_counter_destroy(&sbi->s_dirtyclusters_counter);
 out_freeclusters:

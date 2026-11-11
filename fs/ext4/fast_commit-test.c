@@ -758,6 +758,7 @@ static int stub_fc_get_buf(journal_t *journal, struct buffer_head **bh_out)
 	bh = &ctx->fc_bhs[fc_off];
 	memset(bh->b_data, 0, journal->j_blocksize);
 	set_buffer_uptodate(bh);
+	clear_buffer_write_io_error(bh);
 	get_bh(bh);
 	journal->j_fc_wbuf[fc_off] = bh;
 	*bh_out = bh;
@@ -774,10 +775,13 @@ static void stub_fc_submit_bh(struct super_block *sb, bool is_tail)
 	if (is_tail)
 		ctx->fc_submit_tail_calls++;
 	set_buffer_dirty(bh);
-	if (ctx->fail_fc_wait_bufs)
+	if (ctx->fail_fc_wait_bufs) {
 		clear_buffer_uptodate(bh);
-	else
+		set_buffer_write_io_error(bh);
+	} else {
 		set_buffer_uptodate(bh);
+		clear_buffer_write_io_error(bh);
+	}
 	EXT4_SB(sb)->s_fc_bh = NULL;
 }
 
@@ -839,6 +843,7 @@ static void fc_cleanup_all(void *priv)
 	}
 
 	ext4_es_unregister_shrinker(ctx->sbi);
+	ext4_es_destroy_stats(ctx->sbi);
 	deactivate_super(ctx->sb);
 }
 
