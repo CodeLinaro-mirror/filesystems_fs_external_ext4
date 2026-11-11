@@ -1087,6 +1087,10 @@ unlock:
  *
  * ext4_es_lookup_extent is called by ext4_map_blocks/ext4_da_map_blocks.
  *
+ * If @next_lblk is not NULL, it is set to the starting block of the first
+ * extent after @lblk in the tree, or 0 if there is none, regardless of
+ * whether @lblk itself was found.
+ *
  * Return: 1 on found, 0 on not
  */
 int ext4_es_lookup_extent(struct inode *inode, ext4_lblk_t lblk,
@@ -1157,6 +1161,25 @@ out:
 			*pseq = EXT4_I(inode)->i_es_seq;
 	} else {
 		percpu_counter_inc(&stats->es_stats_cache_misses);
+		if (next_lblk) {
+			/*
+			 * es1 is the last node visited by the tree walk, so
+			 * it is either the successor or the predecessor of
+			 * @lblk (see __es_tree_search()).
+			 */
+			*next_lblk = 0;
+			if (es1 && lblk < es1->es_lblk) {
+				*next_lblk = es1->es_lblk;
+			} else if (es1) {
+				node = rb_next(&es1->rb_node);
+				if (node) {
+					es1 = rb_entry(node,
+						       struct extent_status,
+						       rb_node);
+					*next_lblk = es1->es_lblk;
+				}
+			}
+		}
 	}
 
 	read_unlock(&EXT4_I(inode)->i_es_lock);

@@ -513,6 +513,7 @@ static void test_es_lookup_empty_tree_returns_miss(struct kunit *test)
 		&ctx->sbi->s_es_stats.es_stats_cache_misses);
 	ret = ext4_es_lookup_extent(inode, 10, &next_lblk, &es, NULL);
 	KUNIT_EXPECT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, next_lblk, 0U);
 	KUNIT_EXPECT_EQ(test, percpu_counter_sum_positive(
 		&ctx->sbi->s_es_stats.es_stats_cache_misses),
 		misses_before + 1);
@@ -585,9 +586,23 @@ test_es_lookup_hits_cache_and_rbtree_with_next_lblk(struct kunit *test)
 		&ctx->sbi->s_es_stats.es_stats_cache_hits),
 		hits_before + 4);
 
-	/* Lookup in gap [15..19] returns 0 */
+	/* Lookup in gap [15..19] returns 0 and points next_lblk at [20, 5) */
+	next_lblk = 0xdead;
 	ret = ext4_es_lookup_extent(inode, 15, &next_lblk, &es, NULL);
 	KUNIT_EXPECT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, next_lblk, 20U);
+
+	/* Miss before the first extent points next_lblk at [10, 5) */
+	next_lblk = 0xdead;
+	ret = ext4_es_lookup_extent(inode, 5, &next_lblk, &es, NULL);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, next_lblk, 10U);
+
+	/* Miss after the last extent sets next_lblk to 0 */
+	next_lblk = 0xdead;
+	ret = ext4_es_lookup_extent(inode, 30, &next_lblk, &es, NULL);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, next_lblk, 0U);
 }
 
 static void test_es_fc_replay_bypasses_tree_operations(struct kunit *test)

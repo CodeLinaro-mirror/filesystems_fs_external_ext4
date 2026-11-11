@@ -2971,6 +2971,36 @@ static void test_ext_fiemap_and_get_es_cache(struct kunit *test)
 	KUNIT_ASSERT_EQ(test, err, 0);
 	KUNIT_EXPECT_EQ(test, fieinfo.fi_flags & FIEMAP_FLAG_CACHE, 0U);
 	KUNIT_EXPECT_GE(test, fieinfo.fi_extents_mapped, 5U);
+
+	/*
+	 * ES tree with uncached ranges [0, 10), [20, 50) and beyond 60:
+	 * ext4_get_es_cache() must skip over them instead of stopping, both
+	 * when the query starts in a leading uncached range and when a
+	 * paginated query resumes inside an uncached gap.
+	 */
+	down_write(&EXT4_I(inode)->i_data_sem);
+	ext4_es_remove_extent(inode, 0, EXT_MAX_BLOCKS);
+	ext4_es_insert_extent(inode, 10, 10, 400, EXTENT_STATUS_WRITTEN, 0);
+	ext4_es_insert_extent(inode, 50, 10, 500, EXTENT_STATUS_WRITTEN, 0);
+	up_write(&EXT4_I(inode)->i_data_sem);
+	inode->i_size = 100LL * 4096;
+	EXT4_I(inode)->i_disksize = 100LL * 4096;
+
+	memset(&fieinfo, 0, sizeof(fieinfo));
+	err = ext4_get_es_cache(inode, &fieinfo, 0, 100 * 4096);
+	KUNIT_EXPECT_EQ(test, err, 0);
+	KUNIT_EXPECT_EQ(test, fieinfo.fi_extents_mapped, 2U);
+
+	memset(&fieinfo, 0, sizeof(fieinfo));
+	err = ext4_get_es_cache(inode, &fieinfo, 20 * 4096, 80 * 4096);
+	KUNIT_EXPECT_EQ(test, err, 0);
+	KUNIT_EXPECT_EQ(test, fieinfo.fi_extents_mapped, 1U);
+
+	/* A query range entirely inside an uncached gap reports nothing */
+	memset(&fieinfo, 0, sizeof(fieinfo));
+	err = ext4_get_es_cache(inode, &fieinfo, 20 * 4096, 30 * 4096);
+	KUNIT_EXPECT_EQ(test, err, 0);
+	KUNIT_EXPECT_EQ(test, fieinfo.fi_extents_mapped, 0U);
 }
 
 static const struct kunit_ext_test_param test_split_convert_params[] = {
