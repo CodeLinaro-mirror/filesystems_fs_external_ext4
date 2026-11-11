@@ -69,6 +69,7 @@ struct migrate_test_ctx {
 	ext4_fsblk_t freed_blks[MIGRATE_MAX_FREED_REC];
 	unsigned int freed_cnt;
 	unsigned int datasem_restarts;
+	struct inode *race_inode;
 	bool rwsem_inited;
 	bool es_shrinker_inited;
 };
@@ -380,6 +381,20 @@ static int migrate_datasem_restart_stub(handle_t *handle, struct inode *inode,
 	down_write(&EXT4_I(inode)->i_data_sem);
 	ctx->datasem_restarts++;
 	return 1;
+}
+
+/*
+ * Emulate a block allocation racing with the migration of
+ * ctx->race_inode, which clears EXT4_STATE_EXT_MIGRATE on it.
+ */
+static int migrate_datasem_race_stub(handle_t *handle, struct inode *inode,
+				     int check_cred, int restart_cred,
+				     int revoke_cred)
+{
+	struct migrate_test_ctx *ctx = active_migrate_test->priv;
+
+	ext4_clear_inode_state(ctx->race_inode, EXT4_STATE_EXT_MIGRATE);
+	return 0;
 }
 
 KUNIT_DEFINE_ACTION_WRAPPER(migrate_iput_action, iput, struct inode *);
@@ -866,8 +881,8 @@ static void test_ext_migrate_dind_tind_and_multilevel_tree(struct kunit *test)
 /*
  * Test 4: When reading an indirect block fails midway after tmp_inode has
  * already grown a depth-1 extent tree, free_ext_block() / free_ext_idx()
- * frees the allocated temporary extent metadata block and leaves the original
- * inode untouched.
+ * frees the allocated temporary extent metadata block, leaves the original
+ * inode untouched, and ext4_ext_migrate() returns the error.
  */
 static void test_ext_migrate_error_rollback_frees_tmp_extent_blocks(struct kunit *test)
 {
@@ -893,7 +908,8 @@ static void test_ext_migrate_error_rollback_frees_tmp_extent_blocks(struct kunit
 	EXT4_I(inode)->i_data[EXT4_IND_BLOCK] =
 		cpu_to_le32(MIGRATE_TEST_TOTAL_BLKS + 50);
 
-	(void)ext4_ext_migrate(inode);
+	/* The read error is reported to the caller, not swallowed */
+	KUNIT_EXPECT_EQ(test, ext4_ext_migrate(inode), -EIO);
 
 	/* Temporary extent leaf block allocated during build must be freed */
 	KUNIT_EXPECT_TRUE(test, migrate_was_freed(ctx, expected_leaf_blk));
@@ -1189,6 +1205,35 @@ static void test_ext_migrate_survives_handle_restart(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, ext4_ext_pblock(&ex[2]), 300ULL);
 }
 
+/*
+ * Test 10: If a concurrent block allocation invalidates the migration,
+ * ext4_ext_migrate() reports -EAGAIN instead of claiming success, and the
+ * inode keeps its indirect block map.
+ */
+static void test_ext_migrate_reports_concurrent_allocation(struct kunit *test)
+{
+	struct migrate_test_ctx *ctx = test->priv;
+	struct inode *inode;
+
+	kunit_activate_static_stub(test, ext4_datasem_ensure_credits,
+				   migrate_datasem_race_stub);
+
+	inode = migrate_make_test_inode(test, 24, S_IFREG | 0644);
+	i_size_write(inode, 4 * MIGRATE_TEST_BLK_SIZE);
+	inode->i_blocks = 2 * (MIGRATE_TEST_BLK_SIZE >> 9);
+	EXT4_I(inode)->i_data[0] = cpu_to_le32(100);
+	EXT4_I(inode)->i_data[3] = cpu_to_le32(200);
+	ctx->race_inode = inode;
+
+	KUNIT_EXPECT_EQ(test, ext4_ext_migrate(inode), -EAGAIN);
+	KUNIT_EXPECT_FALSE(test,
+			   ext4_test_inode_flag(inode, EXT4_INODE_EXTENTS));
+	KUNIT_EXPECT_EQ(test, le32_to_cpu(EXT4_I(inode)->i_data[0]), 100U);
+	KUNIT_EXPECT_EQ(test, le32_to_cpu(EXT4_I(inode)->i_data[3]), 200U);
+
+	ctx->race_inode = NULL;
+}
+
 static struct kunit_case ext4_migrate_test_cases[] = {
 	KUNIT_CASE(test_ext_migrate_precondition_checks_and_fast_symlink),
 	KUNIT_CASE(test_ext_migrate_direct_and_ind_coalescing_and_holes),
@@ -1199,6 +1244,7 @@ static struct kunit_case ext4_migrate_test_cases[] = {
 	KUNIT_CASE(test_ind_migrate_rejections),
 	KUNIT_CASE(test_ext_migrate_caps_long_run_at_init_max_len),
 	KUNIT_CASE(test_ext_migrate_survives_handle_restart),
+	KUNIT_CASE(test_ext_migrate_reports_concurrent_allocation),
 	{}
 };
 
