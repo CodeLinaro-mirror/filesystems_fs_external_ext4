@@ -181,7 +181,8 @@ static int verify_group_input(struct super_block *sb,
 	else if (input->reserved_blocks > input->blocks_count / 5)
 		ext4_warning(sb, "Reserved blocks too high (%u)",
 			     input->reserved_blocks);
-	else if (free_blocks_count < 0)
+	else if (input->blocks_count > EXT4_BLOCKS_PER_GROUP(sb) ||
+		 free_blocks_count < 0)
 		ext4_warning(sb, "Bad blocks count %u",
 			     input->blocks_count);
 	else if (IS_ERR(bh = ext4_sb_bread(sb, end - 1, 0))) {

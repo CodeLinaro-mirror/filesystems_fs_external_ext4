@@ -944,6 +944,18 @@ static void test_verify_group_input_rejections_and_acceptance(struct kunit *test
 			-EINVAL);
 	input.blocks_count = RESIZE_TEST_BLOCKS_PER_GRP;
 
+	/*
+	 * 4b. blocks_count spanning two groups, with the block bitmap in the
+	 * second one, would make ext4_flex_group_add() index past the
+	 * single-entry flex group arrays.
+	 */
+	input.blocks_count = 2 * RESIZE_TEST_BLOCKS_PER_GRP;
+	input.block_bitmap = start + RESIZE_TEST_BLOCKS_PER_GRP;
+	KUNIT_EXPECT_EQ(test, ext4_verify_group_input_test(sb, &input),
+			-EINVAL);
+	input.block_bitmap = start + overhead;
+	input.blocks_count = RESIZE_TEST_BLOCKS_PER_GRP;
+
 	/* 5. Last block beyond underlying device -> -EIO */
 	ctx->device_blocks = start + 100;
 	KUNIT_EXPECT_EQ(test, ext4_verify_group_input_test(sb, &input), -EIO);
