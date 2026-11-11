@@ -69,7 +69,7 @@ static int ext4_getfsmap_dev_compare(const void *p1, const void *p2)
 	const struct ext4_getfsmap_dev *d1 = p1;
 	const struct ext4_getfsmap_dev *d2 = p2;
 
-	return d1->gfd_dev - d2->gfd_dev;
+	return cmp_int(d1->gfd_dev, d2->gfd_dev);
 }
 
 /* Compare a record against our starting point */

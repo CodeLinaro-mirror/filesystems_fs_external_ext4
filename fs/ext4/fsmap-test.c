@@ -774,6 +774,61 @@ static void test_getfsmap_external_logdev_and_multi_device(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, head.fmh_entries, 0U);
 }
 
+/*
+ * A data device whose encoded dev_t has bit 31 set (minor >= 0x80000) must
+ * still sort after a lower-numbered external journal device, so that devices
+ * are reported in ascending order and log-device-only queries work.
+ */
+static void test_getfsmap_high_encoded_datadev_order(struct kunit *test)
+{
+	struct fsmap_test_ctx *ctx;
+	struct ext4_fsmap_head head;
+	struct fsmap_rec_sink *sink;
+	u32 datadev, logdev = new_encode_dev(FSMAP_TEST_LOGDEV);
+	int err;
+
+	sink = kunit_kzalloc(test, sizeof(*sink), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, sink);
+	ctx = fsmap_create_ctx(test, 12, 0, 1, 128);
+	fsmap_set_group_tables(ctx, 0, 2, 3, 4);
+	fsmap_mark_clusters_used(ctx, 0, 0, 12);
+
+	ctx->data_bdev.bdev.bd_dev = MKDEV(259, 0x80000);
+	datadev = new_encode_dev(ctx->data_bdev.bdev.bd_dev);
+	KUNIT_ASSERT_GE(test, datadev, 0x80000000U);
+	KUNIT_ASSERT_LT(test, logdev, datadev);
+
+	ctx->mock_journal.j_blk_offset = 16;
+	ctx->mock_journal.j_total_len = 64;
+	ctx->sbi.s_journal = &ctx->mock_journal;
+	ctx->sbi.s_journal_bdev_file = &ctx->log_bdev_file;
+
+	/* Multi-device query reports logdev (2 recs) before datadev (6) */
+	fsmap_init_full_range_head(&head, FSMAP_TEST_MAX_RECS);
+	err = ext4_getfsmap(ctx->sb, &head, fsmap_collect_cb, sink);
+	KUNIT_ASSERT_EQ(test, err, 0);
+	KUNIT_ASSERT_EQ(test, head.fmh_entries, 8U);
+	fsmap_expect_rec(test, &sink->recs[0], logdev, 0, 16,
+			 EXT4_FMR_OWN_UNKNOWN);
+	fsmap_expect_rec(test, &sink->recs[1], logdev, 16, 64,
+			 EXT4_FMR_OWN_LOG);
+	KUNIT_EXPECT_EQ(test, (u32)sink->recs[2].fmr_device, datadev);
+	KUNIT_EXPECT_EQ(test, (u32)sink->recs[7].fmr_device, datadev);
+
+	/* Targeted query against only logdev */
+	memset(sink, 0, sizeof(*sink));
+	fsmap_init_full_range_head(&head, FSMAP_TEST_MAX_RECS);
+	head.fmh_keys[0].fmr_device = logdev;
+	head.fmh_keys[1].fmr_device = logdev;
+	err = ext4_getfsmap(ctx->sb, &head, fsmap_collect_cb, sink);
+	KUNIT_ASSERT_EQ(test, err, 0);
+	KUNIT_ASSERT_EQ(test, head.fmh_entries, 2U);
+	fsmap_expect_rec(test, &sink->recs[0], logdev, 0, 16,
+			 EXT4_FMR_OWN_UNKNOWN);
+	fsmap_expect_rec(test, &sink->recs[1], logdev, 16, 64,
+			 EXT4_FMR_OWN_LOG);
+}
+
 static struct kunit_case fsmap_test_cases[] = {
 	KUNIT_CASE(test_fsmap_unit_conversions),
 	KUNIT_CASE(test_getfsmap_invalid_flags_devices_and_keys),
@@ -782,6 +837,7 @@ static struct kunit_case fsmap_test_cases[] = {
 	KUNIT_CASE(test_getfsmap_1k_bofs_bigalloc_and_meta_bg),
 	KUNIT_CASE(test_getfsmap_count_only_pagination_and_abort),
 	KUNIT_CASE(test_getfsmap_external_logdev_and_multi_device),
+	KUNIT_CASE(test_getfsmap_high_encoded_datadev_order),
 	{}
 };
 
