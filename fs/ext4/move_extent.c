@@ -556,11 +556,11 @@ static int mext_check_adjust_range(struct inode *orig_inode,
 	donor_eof = EXT4_B_TO_LBLK(donor_inode, i_size_read(donor_inode));
 	if (orig_eof <= orig_start)
 		*len = 0;
-	else if (orig_eof < orig_start + *len - 1)
+	else if (orig_eof < orig_start + *len)
 		*len = orig_eof - orig_start;
 	if (donor_eof <= donor_start)
 		*len = 0;
-	else if (donor_eof < donor_start + *len - 1)
+	else if (donor_eof < donor_start + *len)
 		*len = donor_eof - donor_start;
 	if (!*len) {
 		ext4_debug("ext4 move extent: len should not be 0 [ino:orig %llu, donor %llu]\n",

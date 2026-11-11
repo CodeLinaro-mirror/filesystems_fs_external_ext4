@@ -805,6 +805,27 @@ static void test_mext_check_adjust_range(struct kunit *test)
 	ret = ext4_mext_check_adjust_range_test(orig, donor, 4, 4, &len);
 	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
 	KUNIT_EXPECT_EQ(test, len, 0ULL);
+
+	/* A zero length must be rejected, not wrapped to the whole file */
+	len = 0;
+	ret = ext4_mext_check_adjust_range_test(orig, donor, 0, 0, &len);
+	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
+	KUNIT_EXPECT_EQ(test, len, 0ULL);
+
+	/* A range ending exactly one block past EOF must be clamped */
+	i_size_write(orig, MEXT_TEST_BLK_SIZE);		/* orig_eof = 1 */
+	i_size_write(donor, MEXT_TEST_BLK_SIZE);	/* donor_eof = 1 */
+	len = 2;
+	ret = ext4_mext_check_adjust_range_test(orig, donor, 0, 0, &len);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, len, 1ULL);
+
+	i_size_write(orig, 4 * MEXT_TEST_BLK_SIZE);	/* orig_eof = 4 */
+	i_size_write(donor, 8 * MEXT_TEST_BLK_SIZE);	/* donor_eof = 8 */
+	len = 4;
+	ret = ext4_mext_check_adjust_range_test(orig, donor, 1, 1, &len);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, len, 3ULL);
 }
 
 static void test_move_extents_holes_and_unwritten(struct kunit *test)
