@@ -80,6 +80,7 @@ struct ind_test_ctx {
 	unsigned int fail_alloc_on_call;
 	int fail_alloc_err;
 	int read_bh_err;
+	ext4_fsblk_t getblk_fail_blk;
 	ext4_fsblk_t freed_blks[IND_TEST_MAX_FREED_REC];
 	unsigned int freed_cnt;
 	bool rwsem_inited;
@@ -230,6 +231,9 @@ static struct buffer_head *ind_sb_getblk_stub(struct super_block *sb,
 		return NULL;
 	ctx = test->priv;
 	if (!ctx || sb != ctx->sb)
+		return NULL;
+	/* Simulate sb_getblk() failure for one specific block */
+	if (ctx->getblk_fail_blk && block == ctx->getblk_fail_blk)
 		return NULL;
 
 	return ind_get_or_create_bh(ctx, block);
@@ -967,14 +971,15 @@ static void test_ind_map_blocks_errors_and_alloc_branch_unwind(struct kunit *tes
 
 	/*
 	 * 5. Non-uptodate IND block containing invalid blockref (block 1 ==
-	 * s_first_data_block) fails ext4_check_indirect_blockref() -> -EIO.
+	 * s_first_data_block) fails ext4_check_indirect_blockref() ->
+	 * -EFSCORRUPTED.
 	 */
 	((__le32 *)ind_bh->b_data)[0] = cpu_to_le32(IND_TEST_FIRST_DATA_BLK);
 	clear_buffer_uptodate(ind_bh);
 	down_read(&EXT4_I(inode)->i_data_sem);
 	ret = ext4_ind_map_blocks(NULL, inode, &map, 0);
 	up_read(&EXT4_I(inode)->i_data_sem);
-	KUNIT_EXPECT_EQ(test, ret, -EIO);
+	KUNIT_EXPECT_EQ(test, ret, -EFSCORRUPTED);
 	brelse(ind_bh);
 	EXT4_I(inode)->i_data[EXT4_IND_BLOCK] = 0;
 
@@ -1270,6 +1275,86 @@ static void test_ind_free_corrupt_block_numbers(struct kunit *test)
 	iput(inode);
 }
 
+/*
+ * Test 8: ext4_ind_map_blocks(EXT4_GET_BLOCKS_CREATE) must fail, rather than
+ * treat the branch as a hole and splice a new one over the existing pointer,
+ * when ext4_get_branch() fails with -ENOMEM or -EFSCORRUPTED, and must not
+ * leak indirect buffer_heads when rejecting allocation on bigalloc.
+ */
+static void test_ind_map_blocks_create_branch_errors(struct kunit *test)
+{
+	struct ind_test_ctx *ctx = test->priv;
+	struct super_block *sb = ctx->sb;
+	struct inode *inode = ind_make_test_inode(test, 19);
+	struct ext4_map_blocks map;
+	struct buffer_head *ind_bh;
+	ext4_fsblk_t bad_blk = IND_TEST_TOTAL_BLKS + 10;
+	handle_t *handle;
+	int count, ret;
+
+	handle = ext4_journal_start(inode, EXT4_HT_MAP_BLOCKS, 8);
+	KUNIT_ASSERT_FALSE(test, IS_ERR(handle));
+
+	/* Populated IND block 300 mapping IND_BASE -> data block 400 */
+	ind_blk_ptrs(test, 300)[0] = cpu_to_le32(400);
+	EXT4_I(inode)->i_data[EXT4_IND_BLOCK] = cpu_to_le32(300);
+
+	/* 1. sb_getblk() of the IND block fails -> -ENOMEM, IND preserved */
+	ctx->getblk_fail_blk = 300;
+	ctx->alloc_calls = 0;
+	memset(&map, 0, sizeof(map));
+	map.m_lblk = IND_TEST_IND_BASE + 1;
+	map.m_len = 1;
+	down_write(&EXT4_I(inode)->i_data_sem);
+	ret = ext4_ind_map_blocks(handle, inode, &map, EXT4_GET_BLOCKS_CREATE);
+	up_write(&EXT4_I(inode)->i_data_sem);
+	ctx->getblk_fail_blk = 0;
+	KUNIT_EXPECT_EQ(test, ret, -ENOMEM);
+	KUNIT_EXPECT_EQ(test, le32_to_cpu(EXT4_I(inode)->i_data[EXT4_IND_BLOCK]),
+			300U);
+	KUNIT_EXPECT_EQ(test, ctx->alloc_calls, 0U);
+	KUNIT_EXPECT_FALSE(test, map.m_flags & EXT4_MAP_NEW);
+
+	/* 2. Out-of-range IND pointer -> -EFSCORRUPTED, pointer preserved */
+	EXT4_I(inode)->i_data[EXT4_IND_BLOCK] = cpu_to_le32(bad_blk);
+	ctx->alloc_calls = 0;
+	memset(&map, 0, sizeof(map));
+	map.m_lblk = IND_TEST_IND_BASE;
+	map.m_len = 1;
+	down_write(&EXT4_I(inode)->i_data_sem);
+	ret = ext4_ind_map_blocks(handle, inode, &map, EXT4_GET_BLOCKS_CREATE);
+	up_write(&EXT4_I(inode)->i_data_sem);
+	KUNIT_EXPECT_EQ(test, ret, -EFSCORRUPTED);
+	KUNIT_EXPECT_EQ(test, le32_to_cpu(EXT4_I(inode)->i_data[EXT4_IND_BLOCK]),
+			(u32)bad_blk);
+	KUNIT_EXPECT_EQ(test, ctx->alloc_calls, 0U);
+
+	/*
+	 * 3. bigalloc rejection after ext4_get_branch() has read the IND
+	 * block must drop the IND buffer_head reference it holds.
+	 */
+	EXT4_I(inode)->i_data[EXT4_IND_BLOCK] = cpu_to_le32(300);
+	ind_bh = ind_lookup_bh(ctx, 300);
+	KUNIT_ASSERT_NOT_NULL(test, ind_bh);
+	count = atomic_read(&ind_bh->b_count);
+	ctx->alloc_calls = 0;
+	ext4_set_feature_bigalloc(sb);
+	memset(&map, 0, sizeof(map));
+	map.m_lblk = IND_TEST_IND_BASE + 1;
+	map.m_len = 1;
+	down_write(&EXT4_I(inode)->i_data_sem);
+	ret = ext4_ind_map_blocks(handle, inode, &map, EXT4_GET_BLOCKS_CREATE);
+	up_write(&EXT4_I(inode)->i_data_sem);
+	ext4_clear_feature_bigalloc(sb);
+	KUNIT_EXPECT_EQ(test, ret, -EFSCORRUPTED);
+	KUNIT_EXPECT_EQ(test, atomic_read(&ind_bh->b_count), count);
+	KUNIT_EXPECT_EQ(test, ctx->alloc_calls, 0U);
+
+	EXT4_I(inode)->i_data[EXT4_IND_BLOCK] = 0;
+	ext4_journal_stop(handle);
+	iput(inode);
+}
+
 static struct kunit_case ext4_indirect_test_cases[] = {
 	KUNIT_CASE(test_block_to_path_and_trans_blocks),
 	KUNIT_CASE(test_ind_map_blocks_lookup_mapped_and_holes),
@@ -1278,6 +1363,7 @@ static struct kunit_case ext4_indirect_test_cases[] = {
 	KUNIT_CASE(test_ind_truncate_partial_and_full),
 	KUNIT_CASE(test_ind_remove_space_levels_and_convergence),
 	KUNIT_CASE(test_ind_free_corrupt_block_numbers),
+	KUNIT_CASE(test_ind_map_blocks_create_branch_errors),
 	{}
 };
 

@@ -135,6 +135,10 @@ static int ext4_block_to_path(struct inode *inode,
  *		(pointer to last triple returned, *@err == 0)
  *	or when it gets an IO error reading an indirect block
  *		(ditto, *@err == -EIO)
+ *	or when it finds a corrupted indirect block reference
+ *		(ditto, *@err == -EFSCORRUPTED)
+ *	or when it fails to get a buffer for an indirect block
+ *		(ditto, *@err == -ENOMEM)
  *	or when it reads all @depth-1 indirect blocks successfully and finds
  *	the whole chain, all way to the data (returns %NULL, *err == 0).
  *
@@ -177,6 +181,7 @@ static Indirect *ext4_get_branch(struct inode *inode, int depth,
 			/* validate block references */
 			if (ext4_check_indirect_blockref(inode, bh)) {
 				put_bh(bh);
+				ret = -EFSCORRUPTED;
 				goto failure;
 			}
 		}
@@ -572,6 +577,14 @@ int ext4_ind_map_blocks(handle_t *handle, struct inode *inode,
 		goto got_it;
 	}
 
+	/*
+	 * Failed to read the indirect branch (-EIO, -ENOMEM, -EFSCORRUPTED).
+	 * Never treat this as a hole: allocating here would overwrite the
+	 * existing, still referenced, indirect block pointer.
+	 */
+	if (err)
+		goto cleanup;
+
 	/* Next simple case - plain lookup failed */
 	if ((flags & EXT4_GET_BLOCKS_CREATE) == 0) {
 		unsigned epb = inode->i_sb->s_blocksize / sizeof(u32);
@@ -610,10 +623,6 @@ int ext4_ind_map_blocks(handle_t *handle, struct inode *inode,
 		goto cleanup;
 	}
 
-	/* Failed read of indirect block */
-	if (err == -EIO)
-		goto cleanup;
-
 	/*
 	 * Okay, we need to do block allocation.
 	*/
@@ -621,7 +630,7 @@ int ext4_ind_map_blocks(handle_t *handle, struct inode *inode,
 		EXT4_ERROR_INODE(inode, "Can't allocate blocks for "
 				 "non-extent mapped inodes with bigalloc");
 		err = -EFSCORRUPTED;
-		goto out;
+		goto cleanup;
 	}
 
 	/* Set up for the direct block allocation */
