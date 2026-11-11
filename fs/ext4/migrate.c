@@ -52,6 +52,11 @@ static int finish_range(handle_t *handle, struct inode *inode,
 	retval = ext4_datasem_ensure_credits(handle, inode, needed, needed, 0);
 	if (retval < 0)
 		goto err_out;
+	/*
+	 * A positive return only means the handle was restarted.  The
+	 * path is still valid because nobody else can modify tmp_inode.
+	 */
+	retval = 0;
 	path = ext4_ext_insert_extent(handle, inode, path, &newext, 0);
 	if (IS_ERR(path))
 		retval = PTR_ERR(path);

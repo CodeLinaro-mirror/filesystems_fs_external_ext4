@@ -68,6 +68,7 @@ struct migrate_test_ctx {
 	int new_inode_err;
 	ext4_fsblk_t freed_blks[MIGRATE_MAX_FREED_REC];
 	unsigned int freed_cnt;
+	unsigned int datasem_restarts;
 	bool rwsem_inited;
 	bool es_shrinker_inited;
 };
@@ -363,6 +364,22 @@ static bool migrate_was_freed(struct migrate_test_ctx *ctx, ext4_fsblk_t blk)
 			return true;
 	}
 	return false;
+}
+
+/*
+ * Emulate ext4_datasem_ensure_credits() having to restart the transaction:
+ * i_data_sem is dropped and re-acquired and 1 is returned.
+ */
+static int migrate_datasem_restart_stub(handle_t *handle, struct inode *inode,
+					int check_cred, int restart_cred,
+					int revoke_cred)
+{
+	struct migrate_test_ctx *ctx = active_migrate_test->priv;
+
+	up_write(&EXT4_I(inode)->i_data_sem);
+	down_write(&EXT4_I(inode)->i_data_sem);
+	ctx->datasem_restarts++;
+	return 1;
 }
 
 KUNIT_DEFINE_ACTION_WRAPPER(migrate_iput_action, iput, struct inode *);
@@ -1126,6 +1143,52 @@ static void test_ext_migrate_caps_long_run_at_init_max_len(struct kunit *test)
 	KUNIT_EXPECT_TRUE(test, migrate_was_freed(ctx, dind_pblk + 1));
 }
 
+/*
+ * Test 9: A transaction restart while inserting an extent into tmp_inode
+ * (ext4_datasem_ensure_credits() returning 1) is not an error; migration
+ * still completes and builds every extent.
+ */
+static void test_ext_migrate_survives_handle_restart(struct kunit *test)
+{
+	struct migrate_test_ctx *ctx = test->priv;
+	struct ext4_extent_header *eh;
+	struct ext4_extent *ex;
+	struct inode *inode;
+
+	kunit_activate_static_stub(test, ext4_datasem_ensure_credits,
+				   migrate_datasem_restart_stub);
+
+	inode = migrate_make_test_inode(test, 23, S_IFREG | 0644);
+	i_size_write(inode, 12 * MIGRATE_TEST_BLK_SIZE);
+	inode->i_blocks = 4 * (MIGRATE_TEST_BLK_SIZE >> 9);
+
+	/* Three discontiguous runs: [0..1] -> 100, [4] -> 200, [8] -> 300 */
+	EXT4_I(inode)->i_data[0] = cpu_to_le32(100);
+	EXT4_I(inode)->i_data[1] = cpu_to_le32(101);
+	EXT4_I(inode)->i_data[4] = cpu_to_le32(200);
+	EXT4_I(inode)->i_data[8] = cpu_to_le32(300);
+
+	KUNIT_EXPECT_EQ(test, ext4_ext_migrate(inode), 0);
+	KUNIT_EXPECT_EQ(test, ctx->datasem_restarts, 3U);
+	KUNIT_EXPECT_TRUE(test,
+			  ext4_test_inode_flag(inode, EXT4_INODE_EXTENTS));
+	if (!ext4_test_inode_flag(inode, EXT4_INODE_EXTENTS))
+		return;
+
+	eh = ext_inode_hdr(inode);
+	KUNIT_EXPECT_EQ(test, le16_to_cpu(eh->eh_entries), 3U);
+	if (le16_to_cpu(eh->eh_entries) != 3)
+		return;
+	ex = EXT_FIRST_EXTENT(eh);
+	KUNIT_EXPECT_EQ(test, le32_to_cpu(ex[0].ee_block), 0U);
+	KUNIT_EXPECT_EQ(test, ext4_ext_get_actual_len(&ex[0]), 2);
+	KUNIT_EXPECT_EQ(test, ext4_ext_pblock(&ex[0]), 100ULL);
+	KUNIT_EXPECT_EQ(test, le32_to_cpu(ex[1].ee_block), 4U);
+	KUNIT_EXPECT_EQ(test, ext4_ext_pblock(&ex[1]), 200ULL);
+	KUNIT_EXPECT_EQ(test, le32_to_cpu(ex[2].ee_block), 8U);
+	KUNIT_EXPECT_EQ(test, ext4_ext_pblock(&ex[2]), 300ULL);
+}
+
 static struct kunit_case ext4_migrate_test_cases[] = {
 	KUNIT_CASE(test_ext_migrate_precondition_checks_and_fast_symlink),
 	KUNIT_CASE(test_ext_migrate_direct_and_ind_coalescing_and_holes),
@@ -1135,6 +1198,7 @@ static struct kunit_case ext4_migrate_test_cases[] = {
 	KUNIT_CASE(test_ind_migrate_empty_and_single_direct_extent),
 	KUNIT_CASE(test_ind_migrate_rejections),
 	KUNIT_CASE(test_ext_migrate_caps_long_run_at_init_max_len),
+	KUNIT_CASE(test_ext_migrate_survives_handle_restart),
 	{}
 };
 
