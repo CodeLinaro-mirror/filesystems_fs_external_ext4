@@ -330,7 +330,7 @@ int ext4_multi_mount_protect(struct super_block *sb,
 	struct mmp_struct *mmp = NULL;
 	u32 seq;
 	unsigned int mmp_check_interval = ext4_mmp_update_interval(es);
-	unsigned int wait_time = 0;
+	unsigned int wait_time;
 	int retval;
 
 	if (mmp_block < le32_to_cpu(es->s_first_data_block) ||
@@ -358,6 +358,14 @@ int ext4_multi_mount_protect(struct super_block *sb,
 	if (mmp_check_interval > EXT4_MMP_MAX_CHECK_INTERVAL)
 		mmp_check_interval = EXT4_MMP_MAX_CHECK_INTERVAL;
 
+	/*
+	 * Even if the MMP block was released cleanly, another node may be
+	 * claiming it at the same time, so the wait after writing our own
+	 * sequence number below is needed in all cases.
+	 */
+	wait_time = min(mmp_check_interval * 2 + 1,
+			mmp_check_interval + 60);
+
 	seq = le32_to_cpu(mmp->mmp_seq);
 	if (seq == EXT4_MMP_SEQ_CLEAN)
 		goto skip;
@@ -368,8 +376,12 @@ int ext4_multi_mount_protect(struct super_block *sb,
 		goto failed;
 	}
 
-	wait_time = min(mmp_check_interval * 2 + 1,
-			mmp_check_interval + 60);
+	if (seq > EXT4_MMP_SEQ_MAX) {
+		dump_mmp_msg(sb, mmp,
+			     "Unknown MMP sequence, filesystem may be in use");
+		retval = -EBUSY;
+		goto failed;
+	}
 
 	/* Print MMP interval if more than 20 secs. */
 	if (wait_time > EXT4_MMP_MIN_CHECK_INTERVAL * 4)
@@ -395,10 +407,17 @@ int ext4_multi_mount_protect(struct super_block *sb,
 
 skip:
 	/*
-	 * write a new random sequence number.
+	 * write a new random sequence number, and identify ourselves to
+	 * anybody who finds the MMP block in use while we wait.
 	 */
 	seq = mmp_new_seq();
 	mmp->mmp_seq = cpu_to_le32(seq);
+	mmp->mmp_time = cpu_to_le64(ktime_get_real_seconds());
+	memcpy(mmp->mmp_nodename, init_utsname()->nodename,
+	       sizeof(mmp->mmp_nodename));
+	BUILD_BUG_ON(sizeof(mmp->mmp_bdevname) < BDEVNAME_SIZE);
+	snprintf(mmp->mmp_bdevname, sizeof(mmp->mmp_bdevname),
+		 "%pg", bh->b_bdev);
 
 	/*
 	 * On mount / remount we are protected against fs freezing (by s_umount
@@ -430,10 +449,6 @@ skip:
 
 	EXT4_SB(sb)->s_mmp_bh = bh;
 
-	BUILD_BUG_ON(sizeof(mmp->mmp_bdevname) < BDEVNAME_SIZE);
-	snprintf(mmp->mmp_bdevname, sizeof(mmp->mmp_bdevname),
-		 "%pg", bh->b_bdev);
-
 	/*
 	 * Start a kernel thread to update the MMP block periodically.
 	 */
@@ -441,8 +456,13 @@ skip:
 					     (int)sizeof(mmp->mmp_bdevname));
 	if (IS_ERR(EXT4_SB(sb)->s_mmp_tsk)) {
 		EXT4_SB(sb)->s_mmp_tsk = NULL;
+		EXT4_SB(sb)->s_mmp_bh = NULL;
 		ext4_warning(sb, "Unable to create kmmpd thread for %s.",
 			     sb->s_id);
+		/* Release the MMP block again, as kmmpd does on unmount. */
+		mmp->mmp_seq = cpu_to_le32(EXT4_MMP_SEQ_CLEAN);
+		mmp->mmp_time = cpu_to_le64(ktime_get_real_seconds());
+		write_mmp_block_thawed(sb, bh);
 		retval = -ENOMEM;
 		goto failed;
 	}

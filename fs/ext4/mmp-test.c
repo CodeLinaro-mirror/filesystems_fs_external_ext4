@@ -18,6 +18,7 @@
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/timer.h>
+#include <linux/utsname.h>
 #include <linux/workqueue.h>
 
 #include "ext4.h"
@@ -578,7 +579,9 @@ static void test_mmp_clean_and_fsck_sequences(struct kunit *test)
 
 	/*
 	 * EXT4_MMP_SEQ_CLEAN skips pre-claim wait, writes a valid sequence
-	 * <= EXT4_MMP_SEQ_MAX, starts kmmpd, and ext4_stop_mmpd() cleans up.
+	 * <= EXT4_MMP_SEQ_MAX along with our node and device names, still
+	 * waits the full wait_time (2 * 5 + 1 = 11s) before verifying the
+	 * claim, starts kmmpd, and ext4_stop_mmpd() cleans up.
 	 */
 	mmp_init_disk_block(ctx, EXT4_MMP_SEQ_CLEAN, 5);
 	mmp_reset_counters(ctx);
@@ -587,9 +590,14 @@ static void test_mmp_clean_and_fsck_sequences(struct kunit *test)
 	ret = ext4_multi_mount_protect(ctx->sb, MMP_TEST_VALID_BLK);
 	KUNIT_ASSERT_EQ(test, ret, 0);
 	KUNIT_EXPECT_EQ(test, ctx->wait_calls, 1U);
+	KUNIT_EXPECT_EQ(test, ctx->wait_timeouts[0], (long)(11 * HZ));
 	KUNIT_EXPECT_EQ(test, ctx->write_calls, 1U);
 	KUNIT_EXPECT_EQ(test, ctx->run_thread_calls, 1U);
 	KUNIT_EXPECT_LE(test, le32_to_cpu(disk_mmp->mmp_seq), EXT4_MMP_SEQ_MAX);
+	KUNIT_EXPECT_EQ(test, memcmp(disk_mmp->mmp_nodename,
+				     init_utsname()->nodename,
+				     sizeof(disk_mmp->mmp_nodename)), 0);
+	KUNIT_EXPECT_STREQ(test, disk_mmp->mmp_bdevname, "mmp_bdev");
 	KUNIT_EXPECT_NOT_NULL(test, ctx->sbi.s_mmp_tsk);
 	KUNIT_EXPECT_PTR_EQ(test, ctx->sbi.s_mmp_bh, &ctx->mmp_bh);
 	KUNIT_EXPECT_STREQ(test,
@@ -599,6 +607,38 @@ static void test_mmp_clean_and_fsck_sequences(struct kunit *test)
 	ext4_stop_mmpd(&ctx->sbi);
 	KUNIT_EXPECT_NULL(test, ctx->sbi.s_mmp_tsk);
 	KUNIT_EXPECT_EQ(test, atomic_read(&ctx->mmp_bh.b_count), base_ref);
+	ctx->sbi.s_mmp_bh = NULL;
+
+	/* A racing mounter claiming a clean MMP block is detected */
+	mmp_init_disk_block(ctx, EXT4_MMP_SEQ_CLEAN, 5);
+	mmp_reset_counters(ctx);
+	ctx->mutate_seq_on_wait_call = 1;
+	ctx->mutated_seq = 0x1234U;
+
+	ret = ext4_multi_mount_protect(ctx->sb, MMP_TEST_VALID_BLK);
+	KUNIT_EXPECT_EQ(test, ret, -EBUSY);
+	KUNIT_EXPECT_EQ(test, ctx->wait_calls, 1U);
+	KUNIT_EXPECT_EQ(test, ctx->wait_timeouts[0], (long)(11 * HZ));
+	KUNIT_EXPECT_EQ(test, ctx->run_thread_calls, 0U);
+
+	/*
+	 * Unknown sequence values above EXT4_MMP_SEQ_MAX are reserved and
+	 * must be treated like EXT4_MMP_SEQ_FSCK, not as a stale sequence.
+	 */
+	mmp_init_disk_block(ctx, EXT4_MMP_SEQ_FSCK + 1, 5);
+	mmp_reset_counters(ctx);
+	ret = ext4_multi_mount_protect(ctx->sb, MMP_TEST_VALID_BLK);
+	KUNIT_EXPECT_EQ(test, ret, -EBUSY);
+	KUNIT_EXPECT_EQ(test, ctx->wait_calls, 0U);
+	KUNIT_EXPECT_EQ(test, ctx->write_calls, 0U);
+
+	/* EXT4_MMP_SEQ_MAX itself is a valid (stale) sequence */
+	mmp_init_disk_block(ctx, EXT4_MMP_SEQ_MAX, 5);
+	mmp_reset_counters(ctx);
+	ret = ext4_multi_mount_protect(ctx->sb, MMP_TEST_VALID_BLK);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, ctx->wait_calls, 2U);
+	ext4_stop_mmpd(&ctx->sbi);
 	ctx->sbi.s_mmp_bh = NULL;
 }
 
@@ -660,6 +700,7 @@ static void test_mmp_active_seq_conflict_and_claim(struct kunit *test)
 static void test_mmp_interrupted_waits_and_kthread_failure(struct kunit *test)
 {
 	struct mmp_test_ctx *ctx = mmp_setup_ctx(test);
+	struct mmp_struct *disk_mmp = (struct mmp_struct *)ctx->disk_buf;
 
 	/* Signal interruption on pre-claim wait returns -ETIMEDOUT */
 	mmp_init_disk_block(ctx, 77, 5);
@@ -679,7 +720,10 @@ static void test_mmp_interrupted_waits_and_kthread_failure(struct kunit *test)
 			ext4_multi_mount_protect(ctx->sb, MMP_TEST_VALID_BLK),
 			-ETIMEDOUT);
 
-	/* kthread creation failure returns -ENOMEM and leaves s_mmp_tsk NULL */
+	/*
+	 * kthread creation failure returns -ENOMEM, leaves s_mmp_tsk and
+	 * s_mmp_bh NULL, and marks the MMP block clean again.
+	 */
 	mmp_init_disk_block(ctx, EXT4_MMP_SEQ_CLEAN, 5);
 	mmp_reset_counters(ctx);
 	ctx->run_thread_err = -ENOMEM;
@@ -687,6 +731,10 @@ static void test_mmp_interrupted_waits_and_kthread_failure(struct kunit *test)
 			ext4_multi_mount_protect(ctx->sb, MMP_TEST_VALID_BLK),
 			-ENOMEM);
 	KUNIT_EXPECT_NULL(test, ctx->sbi.s_mmp_tsk);
+	KUNIT_EXPECT_NULL(test, ctx->sbi.s_mmp_bh);
+	KUNIT_EXPECT_EQ(test, ctx->write_calls, 2U);
+	KUNIT_EXPECT_EQ(test, le32_to_cpu(disk_mmp->mmp_seq),
+			EXT4_MMP_SEQ_CLEAN);
 	ctx->sbi.s_mmp_bh = NULL;
 }
 
