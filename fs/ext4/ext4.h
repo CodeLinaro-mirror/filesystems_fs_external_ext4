@@ -3385,6 +3385,10 @@ bool ext4_dax_compatible_test(struct inode *inode, unsigned int oldflags,
 /* migrate.c */
 extern int ext4_ext_migrate(struct inode *);
 extern int ext4_ind_migrate(struct inode *inode);
+#if IS_ENABLED(CONFIG_EXT4_KUNIT_TESTS)
+extern int ext4_ext_swap_inode_data_test(handle_t *handle, struct inode *inode,
+					 struct inode *tmp_inode);
+#endif
 
 /* namei.c */
 extern int ext4_init_new_dir(handle_t *handle, struct inode *dir,
