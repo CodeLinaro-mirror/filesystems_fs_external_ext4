@@ -2064,6 +2064,11 @@ long ext4_compat_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	case FS_IOC_SETFSLABEL:
 	case EXT4_IOC_GETFSUUID:
 	case EXT4_IOC_SETFSUUID:
+	case EXT4_IOC_GET_TUNE_SB_PARAM:
+	case EXT4_IOC_SET_TUNE_SB_PARAM:
+	case EXT4_IOC_MIGRATE:
+	case EXT4_IOC_ALLOC_DA_BLKS:
+	case EXT4_IOC_SWAP_BOOT:
 		break;
 	default:
 		return -ENOIOCTLCMD;

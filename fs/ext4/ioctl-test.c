@@ -1452,6 +1452,25 @@ static void test_force_shutdown_and_ioctl_dispatch(struct kunit *test)
 				-EBADF);
 		KUNIT_EXPECT_EQ(test, ext4_ioctl(&filp, EXT4_IOC_SWAP_BOOT, 0),
 				-EBADF);
+#ifdef CONFIG_COMPAT
+		/*
+		 * Architecture-neutral commands must be passed through by
+		 * the compat handler instead of failing with -ENOIOCTLCMD.
+		 */
+		KUNIT_EXPECT_EQ(test,
+				ext4_compat_ioctl(&filp, EXT4_IOC_SWAP_BOOT, 0),
+				-EBADF);
+		KUNIT_EXPECT_EQ(test,
+				ext4_compat_ioctl(&filp,
+						  EXT4_IOC_GET_TUNE_SB_PARAM,
+						  0),
+				-EFAULT);
+		KUNIT_EXPECT_EQ(test,
+				ext4_compat_ioctl(&filp,
+						  EXT4_IOC_SET_TUNE_SB_PARAM,
+						  0),
+				-EFAULT);
+#endif
 		filp.f_mode = FMODE_READ | FMODE_WRITE;
 
 		/* EXT4_IOC_CLEAR_ES_CACHE empties inode extent status tree */
