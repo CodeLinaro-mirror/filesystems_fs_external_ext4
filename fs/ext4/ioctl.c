@@ -1308,7 +1308,8 @@ static int ext4_ioctl_get_tune_sb(struct ext4_sb_info *sbi,
 	ret.mnt_count = le16_to_cpu(es->s_mnt_count);
 	ret.max_mnt_count = le16_to_cpu(es->s_max_mnt_count);
 	ret.checkinterval = le32_to_cpu(es->s_checkinterval);
-	ret.last_check_time = le32_to_cpu(es->s_lastcheck);
+	ret.last_check_time = ((u64)es->s_lastcheck_hi << 32) |
+			      le32_to_cpu(es->s_lastcheck);
 	ret.reserved_blocks = ext4_r_blocks_count(es);
 	ret.blocks_count = ext4_blocks_count(es);
 	ret.reserved_uid = ext4_get_resuid(es);
@@ -1347,8 +1348,10 @@ static void ext4_sb_setparams(struct ext4_sb_info *sbi,
 		es->s_max_mnt_count = cpu_to_le16(params->max_mnt_count);
 	if (params->set_flags & EXT4_TUNE_FL_CHECKINTRVAL)
 		es->s_checkinterval = cpu_to_le32(params->checkinterval);
-	if (params->set_flags & EXT4_TUNE_FL_LAST_CHECK_TIME)
+	if (params->set_flags & EXT4_TUNE_FL_LAST_CHECK_TIME) {
 		es->s_lastcheck = cpu_to_le32(params->last_check_time);
+		es->s_lastcheck_hi = upper_32_bits(params->last_check_time);
+	}
 	if (params->set_flags & EXT4_TUNE_FL_RESERVED_BLOCKS) {
 		ext4_fsblk_t blk = params->reserved_blocks;
 
@@ -1430,6 +1433,11 @@ static int ext4_validate_tune_sb_params(struct super_block *sb,
 
 	if ((params->set_flags & EXT4_TUNE_FL_ERRORS_BEHAVIOR) &&
 	    (params->errors_behavior > EXT4_ERRORS_PANIC))
+		return -EINVAL;
+
+	/* s_lastcheck{,_hi} hold a 40-bit timestamp */
+	if ((params->set_flags & EXT4_TUNE_FL_LAST_CHECK_TIME) &&
+	    (params->last_check_time >> 40))
 		return -EINVAL;
 
 	if ((params->set_flags & EXT4_TUNE_FL_RESERVED_BLOCKS) &&

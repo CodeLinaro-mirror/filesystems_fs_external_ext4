@@ -17,6 +17,7 @@
 #include <linux/iversion.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
+#include <linux/mman.h>
 #include <linux/module.h>
 #include <linux/mount.h>
 #include <linux/part_stat.h>
@@ -27,6 +28,7 @@
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/timer.h>
+#include <linux/uaccess.h>
 #include <linux/uuid.h>
 #include <linux/workqueue.h>
 
@@ -902,6 +904,65 @@ static void test_tune_sb_feature_prereqs(struct kunit *test)
 }
 
 /*
+ * Verify that last_check_time is validated against, stored to, and
+ * reported from the 40-bit s_lastcheck / s_lastcheck_hi timestamp.
+ */
+static void test_tune_sb_last_check_time(struct kunit *test)
+{
+	struct ioctl_test_ctx *ctx = test->priv;
+	struct super_block *sb = ctx->sb;
+	struct ext4_sb_info *sbi = &ctx->sbi;
+	struct ext4_super_block *es = ctx->es;
+	struct ext4_tune_sb_params params;
+	struct vfsmount mnt = {
+		.mnt_root	= sb->s_root,
+		.mnt_sb		= sb,
+		.mnt_idmap	= &nop_mnt_idmap,
+	};
+	struct file filp = {
+		.f_inode	= d_inode(sb->s_root),
+		.f_path		= {
+			.mnt	= &mnt,
+			.dentry	= sb->s_root,
+		},
+		.f_mode		= FMODE_READ,
+	};
+	unsigned long uaddr;
+
+	memset(&params, 0, sizeof(params));
+	params.set_flags = EXT4_TUNE_FL_LAST_CHECK_TIME;
+	params.last_check_time = 1ULL << 40;
+	KUNIT_EXPECT_EQ(test, ext4_validate_tune_sb_params_test(sb, &params),
+			-EINVAL);
+
+	params.last_check_time = 0x123456789aULL;
+	KUNIT_EXPECT_EQ(test, ext4_validate_tune_sb_params_test(sb, &params),
+			0);
+	es->s_lastcheck_hi = 0xff;
+	ext4_sb_setparams_test(sbi, es, &params);
+	KUNIT_EXPECT_EQ(test, le32_to_cpu(es->s_lastcheck), 0x3456789aU);
+	KUNIT_EXPECT_EQ(test, es->s_lastcheck_hi, 0x12);
+
+	/* EXT4_IOC_GET_TUNE_SB_PARAM reports all 40 bits */
+	uaddr = kunit_vm_mmap(test, NULL, 0, PAGE_SIZE,
+			      PROT_READ | PROT_WRITE,
+			      MAP_ANONYMOUS | MAP_PRIVATE, 0);
+	KUNIT_ASSERT_NE_MSG(test, uaddr, 0UL, "Could not create user mm");
+	KUNIT_ASSERT_LT_MSG(test, uaddr, (unsigned long)TASK_SIZE,
+			    "Failed to allocate user memory");
+
+	KUNIT_ASSERT_EQ(test,
+			ext4_ioctl(&filp, EXT4_IOC_GET_TUNE_SB_PARAM, uaddr),
+			0);
+	memset(&params, 0, sizeof(params));
+	KUNIT_ASSERT_EQ(test,
+			copy_from_user(&params, (void __user *)uaddr,
+				       sizeof(params)),
+			0UL);
+	KUNIT_EXPECT_EQ(test, params.last_check_time, 0x123456789aULL);
+}
+
+/*
  * Verify ext4_update_backup_sb, ext4_update_superblocks_fn, and
  * ext4_update_overhead across primary + 4 sparse_super backup groups (1, 3,
  * 5, 7), covering both journaled (first 2 backups) and unjournaled (remaining
@@ -1427,6 +1488,7 @@ static struct kunit_case ioctl_test_cases[] = {
 	KUNIT_CASE(test_tune_sb_mount_opts_guard),
 	KUNIT_CASE(test_tune_sb_dir_index_hash_state),
 	KUNIT_CASE(test_tune_sb_feature_prereqs),
+	KUNIT_CASE(test_tune_sb_last_check_time),
 	KUNIT_CASE(test_update_superblocks_and_overhead),
 	KUNIT_CASE(test_update_backup_sb_bad_csum),
 	KUNIT_CASE(test_swap_inode_data_and_seed),
