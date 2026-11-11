@@ -1038,6 +1038,94 @@ static void test_ind_migrate_rejections(struct kunit *test)
 	ext4_blocks_count_set(ctx->es, MIGRATE_TEST_TOTAL_BLKS);
 }
 
+/*
+ * Test 8: ext4_ext_migrate() splits a physically and logically contiguous
+ * run longer than EXT_INIT_MAX_LEN into multiple initialized extents rather
+ * than encoding the raw length into ee_len, which would turn the extent
+ * into an unwritten one (or wrap ee_len) and lose the file data.
+ */
+static void test_ext_migrate_caps_long_run_at_init_max_len(struct kunit *test)
+{
+	struct migrate_test_ctx *ctx = test->priv;
+	const unsigned int per_blk = MIGRATE_TEST_BLK_SIZE / sizeof(__le32);
+	const unsigned int nr_ind = 128;
+	const ext4_fsblk_t data_pblk = 2000;
+	const ext4_fsblk_t ind_pblk = 600, dind_pblk = 700;
+	const ext4_lblk_t len = EXT4_NDIR_BLOCKS + per_blk + nr_ind * per_blk;
+	const int max_len = EXT_INIT_MAX_LEN;
+	struct ext4_extent_header *eh;
+	struct ext4_extent *ex;
+	struct buffer_head *bh;
+	struct inode *inode;
+	ext4_fsblk_t pblk = data_pblk;
+	unsigned int i, j;
+
+	/* 12 + 256 + 128 * 256 = 33036 blocks > EXT_INIT_MAX_LEN */
+	KUNIT_ASSERT_GT(test, len, (ext4_lblk_t)max_len);
+	ext4_blocks_count_set(ctx->es, data_pblk + len + 1024);
+
+	inode = migrate_make_test_inode(test, 22, S_IFREG | 0644);
+	i_size_write(inode, (loff_t)len * MIGRATE_TEST_BLK_SIZE);
+
+	for (i = 0; i < EXT4_NDIR_BLOCKS; i++)
+		EXT4_I(inode)->i_data[i] = cpu_to_le32(pblk++);
+
+	EXT4_I(inode)->i_data[EXT4_IND_BLOCK] = cpu_to_le32(ind_pblk);
+	bh = migrate_get_or_create_bh(ctx, ind_pblk);
+	KUNIT_ASSERT_NOT_NULL(test, bh);
+	for (j = 0; j < per_blk; j++)
+		((__le32 *)bh->b_data)[j] = cpu_to_le32(pblk++);
+	brelse(bh);
+
+	EXT4_I(inode)->i_data[EXT4_DIND_BLOCK] = cpu_to_le32(dind_pblk);
+	bh = migrate_get_or_create_bh(ctx, dind_pblk);
+	KUNIT_ASSERT_NOT_NULL(test, bh);
+	for (i = 0; i < nr_ind; i++)
+		((__le32 *)bh->b_data)[i] = cpu_to_le32(dind_pblk + 1 + i);
+	brelse(bh);
+
+	for (i = 0; i < nr_ind; i++) {
+		bh = migrate_get_or_create_bh(ctx, dind_pblk + 1 + i);
+		KUNIT_ASSERT_NOT_NULL(test, bh);
+		for (j = 0; j < per_blk; j++)
+			((__le32 *)bh->b_data)[j] = cpu_to_le32(pblk++);
+		brelse(bh);
+	}
+	inode->i_blocks = (blkcnt_t)(len + 2 + nr_ind) *
+			  (MIGRATE_TEST_BLK_SIZE >> 9);
+
+	KUNIT_EXPECT_EQ(test, ext4_ext_migrate(inode), 0);
+	KUNIT_EXPECT_TRUE(test,
+			  ext4_test_inode_flag(inode, EXT4_INODE_EXTENTS));
+	eh = ext_inode_hdr(inode);
+	if (!ext4_test_inode_flag(inode, EXT4_INODE_EXTENTS) ||
+	    !eh->eh_entries)
+		return;
+
+	KUNIT_EXPECT_EQ(test, le16_to_cpu(eh->eh_depth), 0U);
+	ex = EXT_FIRST_EXTENT(eh);
+
+	/* Extent 0: lblk [0..32767] -> data_pblk, initialized */
+	KUNIT_EXPECT_EQ(test, le32_to_cpu(ex[0].ee_block), 0U);
+	KUNIT_EXPECT_FALSE(test, ext4_ext_is_unwritten(&ex[0]));
+	KUNIT_EXPECT_EQ(test, ext4_ext_get_actual_len(&ex[0]), max_len);
+	KUNIT_EXPECT_EQ(test, ext4_ext_pblock(&ex[0]), data_pblk);
+
+	/* Extent 1: remainder of the run, initialized */
+	KUNIT_EXPECT_EQ(test, le16_to_cpu(eh->eh_entries), 2U);
+	if (le16_to_cpu(eh->eh_entries) < 2)
+		return;
+	KUNIT_EXPECT_EQ(test, le32_to_cpu(ex[1].ee_block), (u32)max_len);
+	KUNIT_EXPECT_FALSE(test, ext4_ext_is_unwritten(&ex[1]));
+	KUNIT_EXPECT_EQ(test, ext4_ext_get_actual_len(&ex[1]),
+			(int)len - max_len);
+	KUNIT_EXPECT_EQ(test, ext4_ext_pblock(&ex[1]), data_pblk + max_len);
+
+	/* Indirect metadata blocks were released */
+	KUNIT_EXPECT_TRUE(test, migrate_was_freed(ctx, ind_pblk));
+	KUNIT_EXPECT_TRUE(test, migrate_was_freed(ctx, dind_pblk + 1));
+}
+
 static struct kunit_case ext4_migrate_test_cases[] = {
 	KUNIT_CASE(test_ext_migrate_precondition_checks_and_fast_symlink),
 	KUNIT_CASE(test_ext_migrate_direct_and_ind_coalescing_and_holes),
@@ -1046,6 +1134,7 @@ static struct kunit_case ext4_migrate_test_cases[] = {
 	KUNIT_CASE(test_ext_swap_inode_data_detects_concurrent_allocation),
 	KUNIT_CASE(test_ind_migrate_empty_and_single_direct_extent),
 	KUNIT_CASE(test_ind_migrate_rejections),
+	KUNIT_CASE(test_ext_migrate_caps_long_run_at_init_max_len),
 	{}
 };
 
