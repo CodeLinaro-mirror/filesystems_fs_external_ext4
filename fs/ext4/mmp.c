@@ -152,6 +152,20 @@ void __dump_mmp_msg(struct super_block *sb, struct mmp_struct *mmp,
 }
 
 /*
+ * Return s_mmp_update_interval, using the default if it is zero and capping
+ * it to the maximum that e2fsprogs allows, so that a bogus value can neither
+ * make kmmpd rewrite the MMP block in a busy loop nor stall mount for hours.
+ */
+static unsigned int ext4_mmp_update_interval(struct ext4_super_block *es)
+{
+	unsigned int interval = le16_to_cpu(es->s_mmp_update_interval);
+
+	if (!interval)
+		return EXT4_MMP_UPDATE_INTERVAL;
+	return min_t(unsigned int, interval, EXT4_MMP_MAX_UPDATE_INTERVAL);
+}
+
+/*
  * kmmpd will update the MMP sequence every s_mmp_update_interval seconds
  */
 static int kmmpd(void *data)
@@ -163,7 +177,7 @@ static int kmmpd(void *data)
 	ext4_fsblk_t mmp_block;
 	u32 seq = 0;
 	unsigned long failed_writes = 0;
-	int mmp_update_interval = le16_to_cpu(es->s_mmp_update_interval);
+	unsigned int mmp_update_interval = ext4_mmp_update_interval(es);
 	unsigned mmp_check_interval;
 	unsigned long last_update_time;
 	unsigned long diff;
@@ -176,8 +190,9 @@ static int kmmpd(void *data)
 	 * Start with the higher mmp_check_interval and reduce it if
 	 * the MMP block is being updated on time.
 	 */
-	mmp_check_interval = max(EXT4_MMP_CHECK_MULT * mmp_update_interval,
-				 EXT4_MMP_MIN_CHECK_INTERVAL);
+	mmp_check_interval = clamp(EXT4_MMP_CHECK_MULT * mmp_update_interval,
+				   EXT4_MMP_MIN_CHECK_INTERVAL,
+				   EXT4_MMP_MAX_CHECK_INTERVAL);
 	mmp->mmp_check_interval = cpu_to_le16(mmp_check_interval);
 
 	memcpy(mmp->mmp_nodename, init_utsname()->nodename,
@@ -314,7 +329,7 @@ int ext4_multi_mount_protect(struct super_block *sb,
 	struct buffer_head *bh = NULL;
 	struct mmp_struct *mmp = NULL;
 	u32 seq;
-	unsigned int mmp_check_interval = le16_to_cpu(es->s_mmp_update_interval);
+	unsigned int mmp_check_interval = ext4_mmp_update_interval(es);
 	unsigned int wait_time = 0;
 	int retval;
 
@@ -340,6 +355,8 @@ int ext4_multi_mount_protect(struct super_block *sb,
 	 */
 	if (le16_to_cpu(mmp->mmp_check_interval) > mmp_check_interval)
 		mmp_check_interval = le16_to_cpu(mmp->mmp_check_interval);
+	if (mmp_check_interval > EXT4_MMP_MAX_CHECK_INTERVAL)
+		mmp_check_interval = EXT4_MMP_MAX_CHECK_INTERVAL;
 
 	seq = le32_to_cpu(mmp->mmp_seq);
 	if (seq == EXT4_MMP_SEQ_CLEAN)
@@ -463,4 +480,10 @@ int ext4_write_mmp_block_test(struct super_block *sb, struct buffer_head *bh)
 	return write_mmp_block(sb, bh);
 }
 EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_write_mmp_block_test);
+
+int ext4_kmmpd_test(void *data)
+{
+	return kmmpd(data);
+}
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_kmmpd_test);
 #endif

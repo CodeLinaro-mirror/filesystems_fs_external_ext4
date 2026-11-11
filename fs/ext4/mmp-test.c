@@ -7,6 +7,7 @@
 #include <kunit/test.h>
 #include <linux/blkdev.h>
 #include <linux/buffer_head.h>
+#include <linux/delay.h>
 #include <linux/fs.h>
 #include <linux/fs_context.h>
 #include <linux/kthread.h>
@@ -62,6 +63,14 @@ struct mmp_test_ctx {
 
 	int run_thread_err;
 	unsigned int run_thread_calls;
+
+	/* Real kmmpd() run from the ext4_mmp_run_thread() stub */
+	bool run_kmmpd;
+	struct task_struct *kmmpd_thread;
+	unsigned int kmmpd_write_calls;
+	unsigned int kmmpd_wait_calls;
+	long kmmpd_wait_timeout;
+	u16 kmmpd_check_interval;
 };
 
 static struct kunit *active_mmp_test;
@@ -111,6 +120,20 @@ static int mmp_submit_write_stub(struct buffer_head *bh)
 	if (!test)
 		return -EIO;
 	ctx = test->priv;
+
+	if (current == READ_ONCE(ctx->kmmpd_thread)) {
+		struct mmp_struct *mmp = (struct mmp_struct *)bh->b_data;
+
+		if (!ctx->kmmpd_write_calls)
+			ctx->kmmpd_check_interval =
+				le16_to_cpu(mmp->mmp_check_interval);
+		WRITE_ONCE(ctx->kmmpd_write_calls, ctx->kmmpd_write_calls + 1);
+		/* Never let a misbehaving kmmpd monopolize the CPU */
+		schedule_timeout_interruptible(1);
+		set_buffer_uptodate(bh);
+		return 0;
+	}
+
 	ctx->write_calls++;
 	if (ctx->write_err_on_call &&
 	    ctx->write_calls == (unsigned int)ctx->write_err_on_call) {
@@ -160,6 +183,14 @@ static long mmp_wait_timeout_stub(long timeout)
 	if (!test)
 		return 1;
 	ctx = test->priv;
+
+	if (current == READ_ONCE(ctx->kmmpd_thread)) {
+		ctx->kmmpd_wait_timeout = timeout;
+		WRITE_ONCE(ctx->kmmpd_wait_calls, ctx->kmmpd_wait_calls + 1);
+		/* Really sleep; ext4_stop_mmpd() wakes us up */
+		return schedule_timeout_interruptible(timeout);
+	}
+
 	if (ctx->wait_calls < MMP_MAX_WAITS)
 		ctx->wait_timeouts[ctx->wait_calls] = timeout;
 	ctx->wait_calls++;
@@ -181,6 +212,17 @@ static long mmp_wait_timeout_stub(long timeout)
 	return 0;
 }
 
+static int mmp_kmmpd_thread_fn(void *data)
+{
+	struct kunit *test = active_mmp_test;
+	struct mmp_test_ctx *ctx = test->priv;
+
+	/* Let the static stubs redirect the calls made by kmmpd() too */
+	current->kunit_test = test;
+	WRITE_ONCE(ctx->kmmpd_thread, current);
+	return ext4_kmmpd_test(data);
+}
+
 static struct task_struct *mmp_run_thread_stub(struct super_block *sb,
 					       const char *bdevname,
 					       int bdevname_len)
@@ -194,6 +236,8 @@ static struct task_struct *mmp_run_thread_stub(struct super_block *sb,
 	ctx->run_thread_calls++;
 	if (ctx->run_thread_err)
 		return ERR_PTR(ctx->run_thread_err);
+	if (ctx->run_kmmpd)
+		return kthread_run(mmp_kmmpd_thread_fn, sb, "kunit-kmmpd");
 
 	return kthread_run(mmp_dummy_kthread_fn, NULL, "kunit-mmpd");
 }
@@ -229,6 +273,12 @@ static void mmp_reset_counters(struct mmp_test_ctx *ctx)
 	ctx->mutated_seq = 0;
 	ctx->run_thread_err = 0;
 	ctx->run_thread_calls = 0;
+	ctx->run_kmmpd = false;
+	ctx->kmmpd_thread = NULL;
+	ctx->kmmpd_write_calls = 0;
+	ctx->kmmpd_wait_calls = 0;
+	ctx->kmmpd_wait_timeout = 0;
+	ctx->kmmpd_check_interval = 0;
 }
 
 static void mmp_cleanup_ctx(void *data)
@@ -640,6 +690,124 @@ static void test_mmp_interrupted_waits_and_kthread_failure(struct kunit *test)
 	ctx->sbi.s_mmp_bh = NULL;
 }
 
+static void test_mmp_update_interval_bounds(struct kunit *test)
+{
+	struct mmp_test_ctx *ctx = mmp_setup_ctx(test);
+	int ret;
+
+	/*
+	 * A bogus s_mmp_update_interval must not stall mount for hours:
+	 * the check interval is capped to EXT4_MMP_MAX_CHECK_INTERVAL, so
+	 * wait_time = min(2 * 300 + 1, 300 + 60) = 360s.
+	 */
+	ctx->es->s_mmp_update_interval = cpu_to_le16(U16_MAX);
+	mmp_init_disk_block(ctx, 100, 5);
+	mmp_reset_counters(ctx);
+
+	ret = ext4_multi_mount_protect(ctx->sb, MMP_TEST_VALID_BLK);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, ctx->wait_calls, 2U);
+	KUNIT_EXPECT_EQ(test, ctx->wait_timeouts[0], (long)(360 * HZ));
+	KUNIT_EXPECT_EQ(test, ctx->wait_timeouts[1], (long)(360 * HZ));
+	ext4_stop_mmpd(&ctx->sbi);
+	ctx->sbi.s_mmp_bh = NULL;
+
+	/* Same for a bogus mmp_check_interval in the MMP block */
+	ctx->es->s_mmp_update_interval = cpu_to_le16(EXT4_MMP_UPDATE_INTERVAL);
+	mmp_init_disk_block(ctx, 100, U16_MAX);
+	mmp_reset_counters(ctx);
+
+	ret = ext4_multi_mount_protect(ctx->sb, MMP_TEST_VALID_BLK);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, ctx->wait_calls, 2U);
+	KUNIT_EXPECT_EQ(test, ctx->wait_timeouts[0], (long)(360 * HZ));
+	KUNIT_EXPECT_EQ(test, ctx->wait_timeouts[1], (long)(360 * HZ));
+	ext4_stop_mmpd(&ctx->sbi);
+	ctx->sbi.s_mmp_bh = NULL;
+
+	/* Zero selects the default interval: wait_time = 2 * 5 + 1 = 11s */
+	ctx->es->s_mmp_update_interval = 0;
+	mmp_init_disk_block(ctx, 100, 0);
+	mmp_reset_counters(ctx);
+
+	ret = ext4_multi_mount_protect(ctx->sb, MMP_TEST_VALID_BLK);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, ctx->wait_calls, 2U);
+	KUNIT_EXPECT_EQ(test, ctx->wait_timeouts[0], (long)(11 * HZ));
+	KUNIT_EXPECT_EQ(test, ctx->wait_timeouts[1], (long)(11 * HZ));
+	ext4_stop_mmpd(&ctx->sbi);
+	ctx->sbi.s_mmp_bh = NULL;
+}
+
+/*
+ * Mount with a real kmmpd() thread, then give it time to either go to sleep
+ * after its first MMP block update or rewrite the block several times in a
+ * row without sleeping.
+ */
+static int mmp_start_kmmpd(struct mmp_test_ctx *ctx, u16 update_interval)
+{
+	int ret, i;
+
+	ctx->es->s_mmp_update_interval = cpu_to_le16(update_interval);
+	mmp_init_disk_block(ctx, EXT4_MMP_SEQ_CLEAN, 5);
+	mmp_reset_counters(ctx);
+	ctx->run_kmmpd = true;
+
+	ret = ext4_multi_mount_protect(ctx->sb, MMP_TEST_VALID_BLK);
+	if (ret)
+		return ret;
+
+	for (i = 0; i < 100; i++) {
+		if (READ_ONCE(ctx->kmmpd_wait_calls) ||
+		    READ_ONCE(ctx->kmmpd_write_calls) >= 3)
+			break;
+		msleep(20);
+	}
+	return 0;
+}
+
+static void test_kmmpd_update_interval_bounds(struct kunit *test)
+{
+	struct mmp_test_ctx *ctx = mmp_setup_ctx(test);
+	unsigned int write_calls, wait_calls;
+
+	/*
+	 * s_mmp_update_interval == 0 must not make kmmpd rewrite the MMP
+	 * block in a busy loop; it uses the default interval instead.
+	 * No KUNIT_ASSERT while kmmpd runs: it must be stopped before the
+	 * static stubs are torn down.
+	 */
+	KUNIT_ASSERT_EQ(test, mmp_start_kmmpd(ctx, 0), 0);
+	write_calls = READ_ONCE(ctx->kmmpd_write_calls);
+	wait_calls = READ_ONCE(ctx->kmmpd_wait_calls);
+	ext4_stop_mmpd(&ctx->sbi);
+	ctx->sbi.s_mmp_bh = NULL;
+
+	KUNIT_EXPECT_EQ(test, write_calls, 1U);
+	KUNIT_EXPECT_EQ(test, wait_calls, 1U);
+	KUNIT_EXPECT_GT(test, ctx->kmmpd_wait_timeout, 0L);
+	KUNIT_EXPECT_LE(test, ctx->kmmpd_wait_timeout,
+			(long)(EXT4_MMP_UPDATE_INTERVAL * HZ));
+	KUNIT_EXPECT_EQ(test, ctx->kmmpd_check_interval,
+			EXT4_MMP_CHECK_MULT * EXT4_MMP_UPDATE_INTERVAL);
+
+	/* A huge s_mmp_update_interval is capped */
+	KUNIT_ASSERT_EQ(test, mmp_start_kmmpd(ctx, U16_MAX), 0);
+	write_calls = READ_ONCE(ctx->kmmpd_write_calls);
+	wait_calls = READ_ONCE(ctx->kmmpd_wait_calls);
+	ext4_stop_mmpd(&ctx->sbi);
+	ctx->sbi.s_mmp_bh = NULL;
+
+	KUNIT_EXPECT_EQ(test, write_calls, 1U);
+	KUNIT_EXPECT_EQ(test, wait_calls, 1U);
+	KUNIT_EXPECT_GT(test, ctx->kmmpd_wait_timeout,
+			(long)((EXT4_MMP_MAX_UPDATE_INTERVAL - 1) * HZ));
+	KUNIT_EXPECT_LE(test, ctx->kmmpd_wait_timeout,
+			(long)(EXT4_MMP_MAX_UPDATE_INTERVAL * HZ));
+	KUNIT_EXPECT_EQ(test, ctx->kmmpd_check_interval,
+			EXT4_MMP_MAX_CHECK_INTERVAL);
+}
+
 static struct kunit_case mmp_test_cases[] = {
 	KUNIT_CASE(test_mmp_csum_set_and_verify),
 	KUNIT_CASE(test_read_and_write_mmp_block),
@@ -647,6 +815,8 @@ static struct kunit_case mmp_test_cases[] = {
 	KUNIT_CASE(test_mmp_clean_and_fsck_sequences),
 	KUNIT_CASE(test_mmp_active_seq_conflict_and_claim),
 	KUNIT_CASE(test_mmp_interrupted_waits_and_kthread_failure),
+	KUNIT_CASE(test_mmp_update_interval_bounds),
+	KUNIT_CASE(test_kmmpd_update_interval_bounds),
 	{}
 };
 

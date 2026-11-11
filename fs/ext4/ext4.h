@@ -2882,6 +2882,13 @@ struct mmpd_data {
 #define EXT4_MMP_MAX_CHECK_INTERVAL	300UL
 
 /*
+ * Default and maximum interval between MMP block updates in seconds, as
+ * used by e2fsprogs for s_mmp_update_interval.
+ */
+#define EXT4_MMP_UPDATE_INTERVAL	5UL
+#define EXT4_MMP_MAX_UPDATE_INTERVAL	300UL
+
+/*
  * Function prototypes
  */
 
@@ -4300,6 +4307,7 @@ extern int ext4_read_mmp_block_test(struct super_block *sb,
 				    ext4_fsblk_t mmp_block);
 extern int ext4_write_mmp_block_test(struct super_block *sb,
 				     struct buffer_head *bh);
+extern int ext4_kmmpd_test(void *data);
 #endif
 
 /* verity.c */
