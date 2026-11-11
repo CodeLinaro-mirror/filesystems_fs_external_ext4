@@ -1489,6 +1489,48 @@ static int ext4_validate_tune_sb_params(struct super_block *sb,
 			~le32_to_cpu(es->s_feature_incompat);
 		params->set_feature_ro_compat_mask &=
 			~le32_to_cpu(es->s_feature_ro_compat);
+
+		/*
+		 * Reject features whose prerequisites are otherwise only
+		 * checked at mount time.  The checksum seed must already be
+		 * initialized from metadata_csum, ea_inode is unsupported
+		 * in Hurd compat mode, encryption is incompatible with
+		 * large folios, and project quotas / extra_isize need
+		 * large inodes (and project quotas need quota support).
+		 */
+		if ((params->set_feature_incompat_mask &
+		     EXT4_FEATURE_INCOMPAT_CSUM_SEED) &&
+		    !ext4_has_feature_metadata_csum(sb))
+			return -EINVAL;
+		if ((params->set_feature_incompat_mask &
+		     EXT4_FEATURE_INCOMPAT_EA_INODE) &&
+		    test_opt2(sb, HURD_COMPAT))
+			return -EINVAL;
+		if ((params->set_feature_incompat_mask &
+		     EXT4_FEATURE_INCOMPAT_ENCRYPT) &&
+		    sbi->s_max_folio_order)
+			return -EOPNOTSUPP;
+		if ((params->set_feature_ro_compat_mask &
+		     (EXT4_FEATURE_RO_COMPAT_EXTRA_ISIZE |
+		      EXT4_FEATURE_RO_COMPAT_PROJECT)) &&
+		    EXT4_INODE_SIZE(sb) <= EXT4_GOOD_OLD_INODE_SIZE)
+			return -EINVAL;
+		if ((params->set_feature_ro_compat_mask &
+		     EXT4_FEATURE_RO_COMPAT_PROJECT) &&
+		    (!IS_ENABLED(CONFIG_QUOTA) || !IS_ENABLED(CONFIG_QFMT_V2)))
+			return -EOPNOTSUPP;
+
+		/*
+		 * ea_inode hashes use s_csum_seed, which is only computed
+		 * at mount time if metadata_csum or csum_seed is enabled.
+		 * Initialize it the same way the next mount will.
+		 */
+		if ((params->set_feature_incompat_mask &
+		     EXT4_FEATURE_INCOMPAT_EA_INODE) &&
+		    !ext4_has_feature_metadata_csum(sb) &&
+		    !ext4_has_feature_csum_seed(sb))
+			sbi->s_csum_seed = ext4_chksum(~0, es->s_uuid,
+						       sizeof(es->s_uuid));
 		if (params->set_feature_compat_mask &
 		    EXT4_FEATURE_COMPAT_DIR_INDEX) {
 			uuid_t uu;

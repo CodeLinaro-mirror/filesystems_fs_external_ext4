@@ -807,6 +807,100 @@ static void test_tune_sb_dir_index_hash_state(struct kunit *test)
 			EXT2_FLAGS_UNSIGNED_HASH);
 }
 
+static int ioctl_test_set_features(struct super_block *sb, u32 incompat,
+				   u32 ro_compat)
+{
+	struct ext4_tune_sb_params params;
+
+	memset(&params, 0, sizeof(params));
+	params.set_flags = EXT4_TUNE_FL_EDIT_FEATURES;
+	params.set_feature_incompat_mask = incompat;
+	params.set_feature_ro_compat_mask = ro_compat;
+	return ext4_validate_tune_sb_params_test(sb, &params);
+}
+
+/*
+ * Verify that features whose prerequisites are otherwise only enforced at
+ * mount time are rejected when they can't be satisfied, and that enabling
+ * ea_inode online initializes the checksum seed used for EA inode hashes.
+ */
+static void test_tune_sb_feature_prereqs(struct kunit *test)
+{
+	struct ioctl_test_ctx *ctx = test->priv;
+	struct super_block *sb = ctx->sb;
+	struct ext4_sb_info *sbi = &ctx->sbi;
+	struct ext4_super_block *es = ctx->es;
+	u32 seed = ext4_chksum(~0, es->s_uuid, sizeof(es->s_uuid));
+	int expected;
+
+	/* csum_seed requires metadata_csum */
+	KUNIT_EXPECT_EQ(test,
+			ioctl_test_set_features(sb,
+					EXT4_FEATURE_INCOMPAT_CSUM_SEED, 0),
+			0);
+
+	/* ea_inode is refused in Hurd compat mode */
+	set_opt2(sb, HURD_COMPAT);
+	KUNIT_EXPECT_EQ(test,
+			ioctl_test_set_features(sb,
+					EXT4_FEATURE_INCOMPAT_EA_INODE, 0),
+			-EINVAL);
+	clear_opt2(sb, HURD_COMPAT);
+
+	/* encrypt is refused while large folios are in use */
+	sbi->s_max_folio_order = 2;
+	KUNIT_EXPECT_EQ(test,
+			ioctl_test_set_features(sb,
+					EXT4_FEATURE_INCOMPAT_ENCRYPT, 0),
+			-EOPNOTSUPP);
+	sbi->s_max_folio_order = 0;
+	KUNIT_EXPECT_EQ(test,
+			ioctl_test_set_features(sb,
+					EXT4_FEATURE_INCOMPAT_ENCRYPT, 0),
+			0);
+
+	/* project needs quota support and large inodes */
+	expected = IS_ENABLED(CONFIG_QUOTA) && IS_ENABLED(CONFIG_QFMT_V2) ?
+		   0 : -EOPNOTSUPP;
+	KUNIT_EXPECT_EQ(test,
+			ioctl_test_set_features(sb, 0,
+					EXT4_FEATURE_RO_COMPAT_PROJECT),
+			expected);
+
+	ext4_clear_feature_extra_isize(sb);
+	es->s_inode_size = cpu_to_le16(EXT4_GOOD_OLD_INODE_SIZE);
+	sbi->s_inode_size = EXT4_GOOD_OLD_INODE_SIZE;
+	KUNIT_EXPECT_EQ(test,
+			ioctl_test_set_features(sb, 0,
+					EXT4_FEATURE_RO_COMPAT_PROJECT),
+			-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			ioctl_test_set_features(sb, 0,
+					EXT4_FEATURE_RO_COMPAT_EXTRA_ISIZE),
+			-EINVAL);
+	es->s_inode_size = cpu_to_le16(IOCTL_TEST_INODE_SIZE);
+	sbi->s_inode_size = IOCTL_TEST_INODE_SIZE;
+	KUNIT_EXPECT_EQ(test,
+			ioctl_test_set_features(sb, 0,
+					EXT4_FEATURE_RO_COMPAT_EXTRA_ISIZE),
+			0);
+
+	/* Without metadata_csum, csum_seed is refused ... */
+	ext4_clear_feature_metadata_csum(sb);
+	KUNIT_EXPECT_EQ(test,
+			ioctl_test_set_features(sb,
+					EXT4_FEATURE_INCOMPAT_CSUM_SEED, 0),
+			-EINVAL);
+
+	/* ... and enabling ea_inode sets up the checksum seed */
+	sbi->s_csum_seed = 0;
+	KUNIT_EXPECT_EQ(test,
+			ioctl_test_set_features(sb,
+					EXT4_FEATURE_INCOMPAT_EA_INODE, 0),
+			0);
+	KUNIT_EXPECT_EQ(test, sbi->s_csum_seed, seed);
+}
+
 /*
  * Verify ext4_update_backup_sb, ext4_update_superblocks_fn, and
  * ext4_update_overhead across primary + 4 sparse_super backup groups (1, 3,
@@ -1332,6 +1426,7 @@ static struct kunit_case ioctl_test_cases[] = {
 	KUNIT_CASE(test_validate_tune_sb_params),
 	KUNIT_CASE(test_tune_sb_mount_opts_guard),
 	KUNIT_CASE(test_tune_sb_dir_index_hash_state),
+	KUNIT_CASE(test_tune_sb_feature_prereqs),
 	KUNIT_CASE(test_update_superblocks_and_overhead),
 	KUNIT_CASE(test_update_backup_sb_bad_csum),
 	KUNIT_CASE(test_swap_inode_data_and_seed),
