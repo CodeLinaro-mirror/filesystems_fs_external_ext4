@@ -1308,6 +1308,18 @@ static void test_error_recording_and_update_super(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, le32_to_cpu(es->s_checksum),
 			le32_to_cpu(ext4_superblock_csum(es)));
 
+	/* First recorded error arms the periodic error report timer */
+	KUNIT_EXPECT_TRUE(test, timer_pending(&sbi->s_err_report));
+
+	/* err_report_sec == 0 disables the timer even for a first error */
+	timer_delete_sync(&sbi->s_err_report);
+	es->s_error_count = 0;
+	sbi->s_err_report_sec = 0;
+	ext4_save_error_info_test(sb, EIO, 31, 4096, "third_fn", 333);
+	ext4_update_super_test(sb);
+	KUNIT_EXPECT_EQ(test, le32_to_cpu(es->s_error_count), 1U);
+	KUNIT_EXPECT_FALSE(test, timer_pending(&sbi->s_err_report));
+
 	/* Read-only superblock update must not touch s_wtime */
 	es->s_wtime = cpu_to_le32(123456U);
 	saved_wtime = es->s_wtime;

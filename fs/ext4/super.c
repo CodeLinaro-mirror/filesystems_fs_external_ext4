@@ -6360,6 +6360,7 @@ static void ext4_update_super(struct super_block *sb)
 	struct ext4_sb_info *sbi = EXT4_SB(sb);
 	struct ext4_super_block *es = sbi->s_es;
 	struct buffer_head *sbh = sbi->s_sbh;
+	unsigned long err_report_sec;
 
 	lock_buffer(sbh);
 	/*
@@ -6418,9 +6419,10 @@ static void ext4_update_super(struct super_block *sb)
 		 * Start the daily error reporting function if it hasn't been
 		 * started already and sbi->s_err_report_sec is not zero
 		 */
-		if (!es->s_error_count && !sbi->s_err_report_sec)
+		err_report_sec = READ_ONCE(sbi->s_err_report_sec);
+		if (!es->s_error_count && err_report_sec)
 			mod_timer(&sbi->s_err_report,
-					  jiffies + secs_to_jiffies(sbi->s_err_report_sec));
+				  jiffies + secs_to_jiffies(err_report_sec));
 		le32_add_cpu(&es->s_error_count, sbi->s_add_error_count);
 		sbi->s_add_error_count = 0;
 	}
