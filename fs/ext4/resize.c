@@ -2192,7 +2192,8 @@ retry:
 					 ext4_blocks_count(es));
 			last_update_time = jiffies;
 		}
-		if (ext4_alloc_group_tables(sb, flex_gd, flexbg_size) != 0)
+		err = ext4_alloc_group_tables(sb, flex_gd, flexbg_size);
+		if (err)
 			break;
 		err = ext4_flex_group_add(sb, resize_inode, flex_gd);
 		if (unlikely(err))

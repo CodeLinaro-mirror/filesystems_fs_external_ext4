@@ -1403,6 +1403,29 @@ static void test_resize_fs_flex_group_straddles_first_meta_bg(struct kunit *test
 			  ext4_group_first_block_no(sb, 49) + 2));
 }
 
+/*
+ * Test 10: ext4_resize_fs() must report a failure of ext4_alloc_group_tables()
+ * instead of returning success without growing the file system.  With one
+ * reserved GDT block, sparse group 3 has 1021 usable blocks, which cannot
+ * hold two bitmaps plus a 1020-block inode table.
+ */
+static void test_resize_fs_alloc_group_tables_enospc(struct kunit *test)
+{
+	struct resize_test_ctx *ctx = test->priv;
+	struct super_block *sb = ctx->sb;
+	ext4_fsblk_t o_blks, target_blks;
+
+	resize_configure_fs(test, 3, 1, 0, RESIZE_TEST_BLOCKS_PER_GRP);
+	ctx->sbi.s_itb_per_group = 1020;
+	o_blks = ext4_blocks_count(ctx->es);
+	target_blks = RESIZE_TEST_FIRST_DATA_BLK +
+		      5ULL * RESIZE_TEST_BLOCKS_PER_GRP;
+
+	KUNIT_EXPECT_EQ(test, ext4_resize_fs(sb, target_blks), -ENOSPC);
+	KUNIT_EXPECT_EQ(test, ctx->sbi.s_groups_count, 3U);
+	KUNIT_EXPECT_EQ(test, ext4_blocks_count(ctx->es), o_blks);
+}
+
 static struct kunit_case ext4_resize_test_cases[] = {
 	KUNIT_CASE(test_resize_begin_and_end_guards),
 	KUNIT_CASE(test_list_backups_and_verify_reserved_gdb),
@@ -1413,6 +1436,7 @@ static struct kunit_case ext4_resize_test_cases[] = {
 	KUNIT_CASE(test_convert_meta_bg_validation_and_conversion),
 	KUNIT_CASE(test_resize_fs_across_resize_inode_to_meta_bg),
 	KUNIT_CASE(test_resize_fs_flex_group_straddles_first_meta_bg),
+	KUNIT_CASE(test_resize_fs_alloc_group_tables_enospc),
 	{}
 };
 
