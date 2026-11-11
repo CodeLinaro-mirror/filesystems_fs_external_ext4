@@ -1079,6 +1079,31 @@ static void test_overhead_and_statfs(struct kunit *test)
 	/* Cluster 0 holds super+gdb+bbitmap+ibitmap; clusters 1..2 hold itb */
 	KUNIT_EXPECT_EQ(test, ext4_count_overhead_test(sb, 0, buf), 3);
 
+	/* Inode table ending on the group's last block: clusters 254..255 */
+	ext4_inode_table_set(sb, &ctx->gdps[0], SUPER_TEST_BLOCKS_PER_GRP - 8);
+	memset(buf, 0, SUPER_TEST_BLK_SIZE);
+	KUNIT_EXPECT_EQ(test, ext4_count_overhead_test(sb, 0, buf), 3);
+
+	/*
+	 * flex_bg style layout where group 1's inode table (2044..2051)
+	 * straddles the boundary between group 1 (1024..2047) and group 2
+	 * (2048..3071); each group must count its own part of it.
+	 */
+	sbi->s_groups_count = 3;
+	ext4_inode_table_set(sb, &ctx->gdps[0], 4);
+	ext4_block_bitmap_set(sb, &ctx->gdps[1], 1028);
+	ext4_inode_bitmap_set(sb, &ctx->gdps[1], 1029);
+	ext4_inode_table_set(sb, &ctx->gdps[1], 2044);
+	ext4_block_bitmap_set(sb, &ctx->gdps[2], 2056);
+	ext4_inode_bitmap_set(sb, &ctx->gdps[2], 2057);
+	ext4_inode_table_set(sb, &ctx->gdps[2], 2060);
+	/* Group 1: super+gdb, bitmaps, and the head of its inode table */
+	memset(buf, 0, SUPER_TEST_BLK_SIZE);
+	KUNIT_EXPECT_EQ(test, ext4_count_overhead_test(sb, 1, buf), 3);
+	/* Group 2: tail of group 1's inode table, bitmaps, own inode table */
+	memset(buf, 0, SUPER_TEST_BLK_SIZE);
+	KUNIT_EXPECT_EQ(test, ext4_count_overhead_test(sb, 2, buf), 4);
+
 	/* Restore 1:1 geometry and verify ext4_statfs accounting & clamping */
 	ext4_clear_feature_bigalloc(sb);
 	ctx->es.s_first_data_block = cpu_to_le32(SUPER_TEST_FIRST_DATA_BLK);

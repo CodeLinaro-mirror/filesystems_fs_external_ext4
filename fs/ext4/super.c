@@ -4308,12 +4308,23 @@ static int count_overhead(struct super_block *sb, ext4_group_t grp,
 			count++;
 		}
 		b = ext4_inode_table(sb, gdp);
-		if (b >= first_block && b + sbi->s_itb_per_group <= last_block)
-			for (j = 0; j < sbi->s_itb_per_group; j++, b++) {
+		/*
+		 * The inode table is s_itb_per_group blocks long and, with
+		 * flex_bg, may straddle a block group boundary.  Only count
+		 * the part of it which lies inside this block group.
+		 */
+		if (b <= last_block &&
+		    b + sbi->s_itb_per_group - 1 >= first_block) {
+			ext4_fsblk_t start = max(b, first_block);
+			ext4_fsblk_t end = min(b + sbi->s_itb_per_group - 1,
+					       last_block);
+
+			for (b = start; b <= end; b++) {
 				int c = EXT4_B2C(sbi, b - first_block);
 				ext4_set_bit(c, buf);
 				count++;
 			}
+		}
 		if (i != grp)
 			continue;
 		s = 0;
