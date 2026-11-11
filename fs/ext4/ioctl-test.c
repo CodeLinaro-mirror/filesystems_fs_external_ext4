@@ -534,8 +534,6 @@ static void test_sb_callbacks_and_setparams(struct kunit *test)
 			   EXT4_TUNE_FL_DEF_HASH_ALG |
 			   EXT4_TUNE_FL_RAID_STRIDE |
 			   EXT4_TUNE_FL_RAID_STRIPE_WIDTH |
-			   EXT4_TUNE_FL_ENCODING |
-			   EXT4_TUNE_FL_ENCODING_FLAGS |
 			   EXT4_TUNE_FL_MOUNT_OPTS |
 			   EXT4_TUNE_FL_EDIT_FEATURES |
 			   EXT4_TUNE_FL_FORCE_FSCK;
@@ -551,8 +549,6 @@ static void test_sb_callbacks_and_setparams(struct kunit *test)
 	params.def_hash_alg = DX_HASH_HALF_MD4;
 	params.raid_stride = 16;
 	params.raid_stripe_width = 128;
-	params.encoding = EXT4_ENC_UTF8_12_1;
-	params.encoding_flags = SB_ENC_STRICT_MODE_FL;
 	strscpy(params.mount_opts, "nodelalloc,noatime",
 		sizeof(params.mount_opts));
 	params.set_feature_compat_mask = EXT4_FEATURE_COMPAT_DIR_INDEX;
@@ -575,9 +571,6 @@ static void test_sb_callbacks_and_setparams(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, es->s_def_hash_version, DX_HASH_TEA);
 	KUNIT_EXPECT_EQ(test, le16_to_cpu(es->s_raid_stride), 16);
 	KUNIT_EXPECT_EQ(test, le32_to_cpu(es->s_raid_stripe_width), 128U);
-	KUNIT_EXPECT_EQ(test, le16_to_cpu(es->s_encoding), EXT4_ENC_UTF8_12_1);
-	KUNIT_EXPECT_EQ(test, le16_to_cpu(es->s_encoding_flags),
-			SB_ENC_STRICT_MODE_FL);
 	KUNIT_EXPECT_STREQ(test, (char *)es->s_mount_opts,
 			   "nodelalloc,noatime");
 	KUNIT_EXPECT_NE(test,
@@ -595,8 +588,9 @@ static void test_sb_callbacks_and_setparams(struct kunit *test)
 
 /*
  * Verify ext4_validate_tune_sb_params rejects malformed mount_opts, invalid
- * flags, out-of-range parameters, unsupported feature edits, and standalone
- * encoding updates, while normalizing DIR_INDEX and CASEFOLD enablement.
+ * flags, out-of-range parameters, unsupported feature edits, encoding
+ * updates and online casefold enablement, while normalizing DIR_INDEX
+ * enablement.
  */
 static void test_validate_tune_sb_params(struct kunit *test)
 {
@@ -687,20 +681,33 @@ static void test_validate_tune_sb_params(struct kunit *test)
 	KUNIT_EXPECT_FALSE(test, uuid_is_null(&uu));
 	KUNIT_EXPECT_EQ(test, sbi->s_def_hash_version, DX_HASH_HALF_MD4);
 
-	/* Encoding without CASEFOLD -> -EINVAL; with CASEFOLD -> UTF8_12_1 */
+	/* Encoding changes and online casefold enablement -> -EOPNOTSUPP */
 	memset(&params, 0, sizeof(params));
 	params.set_flags = EXT4_TUNE_FL_ENCODING;
 	params.encoding = EXT4_ENC_UTF8_12_1;
 	KUNIT_EXPECT_EQ(test, ext4_validate_tune_sb_params_test(sb, &params),
-			-EINVAL);
+			-EOPNOTSUPP);
+
+	memset(&params, 0, sizeof(params));
+	params.set_flags = EXT4_TUNE_FL_ENCODING_FLAGS;
+	KUNIT_EXPECT_EQ(test, ext4_validate_tune_sb_params_test(sb, &params),
+			-EOPNOTSUPP);
 
 	memset(&params, 0, sizeof(params));
 	params.set_flags = EXT4_TUNE_FL_EDIT_FEATURES;
 	params.set_feature_incompat_mask = EXT4_FEATURE_INCOMPAT_CASEFOLD;
 	KUNIT_EXPECT_EQ(test, ext4_validate_tune_sb_params_test(sb, &params),
-			0);
-	KUNIT_EXPECT_EQ(test, params.encoding, EXT4_ENC_UTF8_12_1);
-	KUNIT_EXPECT_EQ(test, params.encoding_flags, 0);
+			-EOPNOTSUPP);
+
+	memset(&params, 0, sizeof(params));
+	params.set_flags = EXT4_TUNE_FL_FEATURES;
+	params.feature_compat = le32_to_cpu(es->s_feature_compat);
+	params.feature_incompat = le32_to_cpu(es->s_feature_incompat) |
+				  EXT4_FEATURE_INCOMPAT_CASEFOLD;
+	params.feature_ro_compat = le32_to_cpu(es->s_feature_ro_compat);
+	KUNIT_EXPECT_EQ(test, ext4_validate_tune_sb_params_test(sb, &params),
+			-EOPNOTSUPP);
+	KUNIT_EXPECT_FALSE(test, ext4_has_feature_casefold(sb));
 }
 
 /*
