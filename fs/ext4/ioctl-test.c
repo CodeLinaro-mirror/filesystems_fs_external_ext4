@@ -609,6 +609,7 @@ static void test_validate_tune_sb_params(struct kunit *test)
 
 	/* Unterminated mount_opts -> -E2BIG */
 	memset(&params, 0, sizeof(params));
+	params.set_flags = EXT4_TUNE_FL_MOUNT_OPTS;
 	memset(params.mount_opts, 'a', sizeof(params.mount_opts));
 	KUNIT_EXPECT_EQ(test, ext4_validate_tune_sb_params_test(sb, &params),
 			-E2BIG);
@@ -700,6 +701,44 @@ static void test_validate_tune_sb_params(struct kunit *test)
 			0);
 	KUNIT_EXPECT_EQ(test, params.encoding, EXT4_ENC_UTF8_12_1);
 	KUNIT_EXPECT_EQ(test, params.encoding_flags, 0);
+}
+
+/*
+ * Verify that s_mount_opts is only validated and rewritten when
+ * EXT4_TUNE_FL_MOUNT_OPTS is set, so that tuning an unrelated field does
+ * not wipe the mount options stored in the superblock.
+ */
+static void test_tune_sb_mount_opts_guard(struct kunit *test)
+{
+	struct ioctl_test_ctx *ctx = test->priv;
+	struct super_block *sb = ctx->sb;
+	struct ext4_sb_info *sbi = &ctx->sbi;
+	struct ext4_super_block *es = ctx->es;
+	struct ext4_tune_sb_params params;
+
+	strscpy_pad(es->s_mount_opts, "journal_checksum");
+
+	/* Garbage in mount_opts is ignored without EXT4_TUNE_FL_MOUNT_OPTS */
+	memset(&params, 0, sizeof(params));
+	params.set_flags = EXT4_TUNE_FL_ERRORS_BEHAVIOR;
+	params.errors_behavior = EXT4_ERRORS_RO;
+	memset(params.mount_opts, 'a', sizeof(params.mount_opts));
+	KUNIT_EXPECT_EQ(test, ext4_validate_tune_sb_params_test(sb, &params),
+			0);
+
+	/* Tuning another field leaves s_mount_opts untouched */
+	memset(params.mount_opts, 0, sizeof(params.mount_opts));
+	ext4_sb_setparams_test(sbi, es, &params);
+	KUNIT_EXPECT_EQ(test, le16_to_cpu(es->s_errors), EXT4_ERRORS_RO);
+	KUNIT_EXPECT_STREQ(test, (char *)es->s_mount_opts, "journal_checksum");
+
+	/* With EXT4_TUNE_FL_MOUNT_OPTS the new value is written */
+	params.set_flags = EXT4_TUNE_FL_MOUNT_OPTS;
+	strscpy(params.mount_opts, "nodelalloc", sizeof(params.mount_opts));
+	KUNIT_EXPECT_EQ(test, ext4_validate_tune_sb_params_test(sb, &params),
+			0);
+	ext4_sb_setparams_test(sbi, es, &params);
+	KUNIT_EXPECT_STREQ(test, (char *)es->s_mount_opts, "nodelalloc");
 }
 
 /*
@@ -1179,6 +1218,7 @@ static void test_force_shutdown_and_ioctl_dispatch(struct kunit *test)
 static struct kunit_case ioctl_test_cases[] = {
 	KUNIT_CASE(test_sb_callbacks_and_setparams),
 	KUNIT_CASE(test_validate_tune_sb_params),
+	KUNIT_CASE(test_tune_sb_mount_opts_guard),
 	KUNIT_CASE(test_update_superblocks_and_overhead),
 	KUNIT_CASE(test_swap_inode_data_and_seed),
 	KUNIT_CASE(test_immutable_dax_and_fileattr),

@@ -1407,7 +1407,8 @@ static int ext4_validate_tune_sb_params(struct super_block *sb,
 	struct ext4_super_block *es = sbi->s_es;
 	int enabling_casefold = 0;
 
-	if (strnlen(params->mount_opts, sizeof(params->mount_opts)) ==
+	if ((params->set_flags & EXT4_TUNE_FL_MOUNT_OPTS) &&
+	    strnlen(params->mount_opts, sizeof(params->mount_opts)) ==
 	    sizeof(params->mount_opts))
 		return -E2BIG;
 
