@@ -4207,9 +4207,25 @@ extern struct ext4_io_end_vec *ext4_last_io_end_vec(ext4_io_end_t *io_end);
 
 /* mmp.c */
 extern int ext4_multi_mount_protect(struct super_block *, ext4_fsblk_t);
-
-/* mmp.c */
 extern void ext4_stop_mmpd(struct ext4_sb_info *sbi);
+extern int ext4_mmp_submit_write(struct buffer_head *bh);
+extern int ext4_mmp_load_bh(struct super_block *sb, struct buffer_head **bh,
+			    ext4_fsblk_t mmp_block);
+extern long ext4_mmp_wait_timeout(long timeout);
+extern struct task_struct *ext4_mmp_run_thread(struct super_block *sb,
+					       const char *bdevname,
+					       int bdevname_len);
+#if IS_ENABLED(CONFIG_EXT4_KUNIT_TESTS)
+extern int ext4_mmp_csum_verify_test(struct super_block *sb,
+				     struct mmp_struct *mmp);
+extern void ext4_mmp_csum_set_test(struct super_block *sb,
+				   struct mmp_struct *mmp);
+extern int ext4_read_mmp_block_test(struct super_block *sb,
+				    struct buffer_head **bh,
+				    ext4_fsblk_t mmp_block);
+extern int ext4_write_mmp_block_test(struct super_block *sb,
+				     struct buffer_head *bh);
+#endif
 
 /* verity.c */
 extern const struct fsverity_operations ext4_verityops;
