@@ -1312,6 +1312,85 @@ static void test_resize_fs_across_resize_inode_to_meta_bg(struct kunit *test)
 			34U * RESIZE_TEST_INODES_PER_GRP);
 }
 
+static bool resize_blk_matches(struct resize_test_ctx *ctx, ext4_fsblk_t blk,
+			       struct buffer_head *src)
+{
+	struct buffer_head *bh = resize_lookup_bh(ctx, blk);
+
+	return bh && !memcmp(bh->b_data, src->b_data, src->b_size);
+}
+
+/*
+ * Test 9: ext4_resize_fs() on a file system without resize_inode, where a
+ * single 64-group flex batch (groups 20..63) straddles s_first_meta_bg (2).
+ * GDT blocks 0 and 1 use the traditional layout and must be backed up only
+ * into sparse groups below 32 (including new groups 25 and 27); GDT blocks
+ * 2 and 3 use the meta_bg layout and must be backed up into the second and
+ * last group of their meta group, without scribbling over other blocks.
+ */
+static void test_resize_fs_flex_group_straddles_first_meta_bg(struct kunit *test)
+{
+	struct resize_test_ctx *ctx = test->priv;
+	struct super_block *sb = ctx->sb;
+	struct ext4_sb_info *sbi = &ctx->sbi;
+	struct ext4_super_block *backup_es;
+	struct buffer_head *gdb[4], *bh;
+	ext4_fsblk_t target_blks;
+	unsigned int i;
+
+	/* 20 groups: GDT block 0 full, GDT block 1 holds groups 16..19 */
+	resize_configure_fs(test, 20, 0, 6, RESIZE_TEST_BLOCKS_PER_GRP);
+	target_blks = RESIZE_TEST_FIRST_DATA_BLK +
+		      64ULL * RESIZE_TEST_BLOCKS_PER_GRP;
+
+	KUNIT_ASSERT_EQ(test, ext4_resize_fs(sb, target_blks), 0);
+	KUNIT_ASSERT_EQ(test, sbi->s_groups_count, 64U);
+	KUNIT_ASSERT_EQ(test, sbi->s_gdb_count, 4UL);
+	KUNIT_ASSERT_TRUE(test, ext4_has_feature_meta_bg(sb));
+	KUNIT_ASSERT_EQ(test, le32_to_cpu(ctx->es->s_first_meta_bg), 2U);
+
+	for (i = 0; i < ARRAY_SIZE(gdb); i++)
+		gdb[i] = sbi_array_rcu_deref(sbi, s_group_desc, i);
+
+	/* Traditional GDT backups in the new sparse groups 25 and 27 */
+	KUNIT_EXPECT_TRUE(test, resize_blk_matches(ctx,
+			  ext4_group_first_block_no(sb, 25) + 1, gdb[0]));
+	KUNIT_EXPECT_TRUE(test, resize_blk_matches(ctx,
+			  ext4_group_first_block_no(sb, 25) + 2, gdb[1]));
+	KUNIT_EXPECT_TRUE(test, resize_blk_matches(ctx,
+			  ext4_group_first_block_no(sb, 27) + 1, gdb[0]));
+	KUNIT_EXPECT_TRUE(test, resize_blk_matches(ctx,
+			  ext4_group_first_block_no(sb, 27) + 2, gdb[1]));
+
+	/* meta_bg descriptor backups in groups 33/47 and 49/63 */
+	KUNIT_EXPECT_TRUE(test, resize_blk_matches(ctx,
+			  ext4_group_first_block_no(sb, 33), gdb[2]));
+	KUNIT_EXPECT_TRUE(test, resize_blk_matches(ctx,
+			  ext4_group_first_block_no(sb, 47), gdb[2]));
+	KUNIT_EXPECT_TRUE(test, resize_blk_matches(ctx,
+			  ext4_group_first_block_no(sb, 49) + 1, gdb[3]));
+	KUNIT_EXPECT_TRUE(test, resize_blk_matches(ctx,
+			  ext4_group_first_block_no(sb, 63), gdb[3]));
+
+	/* Backup superblock in group 49 must not be overwritten */
+	bh = resize_lookup_bh(ctx, ext4_group_first_block_no(sb, 49));
+	KUNIT_ASSERT_NOT_NULL(test, bh);
+	backup_es = (struct ext4_super_block *)bh->b_data;
+	KUNIT_EXPECT_EQ(test, le16_to_cpu(backup_es->s_magic),
+			EXT4_SUPER_MAGIC);
+	KUNIT_EXPECT_EQ(test, le16_to_cpu(backup_es->s_block_group_nr), 49U);
+
+	/*
+	 * Free blocks must not be written: the start of group 35 (meta_bg
+	 * GDT block 2 treated as a traditional offset) and the block after
+	 * group 49's meta_bg backup (traditional GDT block 1 copy).
+	 */
+	KUNIT_EXPECT_NULL(test, resize_lookup_bh(ctx,
+			  ext4_group_first_block_no(sb, 35)));
+	KUNIT_EXPECT_NULL(test, resize_lookup_bh(ctx,
+			  ext4_group_first_block_no(sb, 49) + 2));
+}
+
 static struct kunit_case ext4_resize_test_cases[] = {
 	KUNIT_CASE(test_resize_begin_and_end_guards),
 	KUNIT_CASE(test_list_backups_and_verify_reserved_gdb),
@@ -1321,6 +1400,7 @@ static struct kunit_case ext4_resize_test_cases[] = {
 	KUNIT_CASE(test_group_add_with_resize_inode_and_backup_gdb),
 	KUNIT_CASE(test_convert_meta_bg_validation_and_conversion),
 	KUNIT_CASE(test_resize_fs_across_resize_inode_to_meta_bg),
+	KUNIT_CASE(test_resize_fs_flex_group_straddles_first_meta_bg),
 	{}
 };
 

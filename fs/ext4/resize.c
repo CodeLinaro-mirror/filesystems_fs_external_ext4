@@ -127,6 +127,17 @@ static ext4_grpblk_t ext4_group_overhead_blocks(struct super_block *sb,
 	return overhead;
 }
 
+/*
+ * Return true if group descriptor block @gdb_num uses the meta_bg layout
+ * (stored in the first group of its meta block group) rather than the
+ * traditional layout (stored right after the superblock).
+ */
+static bool ext4_gdb_is_meta_bg(struct super_block *sb, unsigned long gdb_num)
+{
+	return ext4_has_feature_meta_bg(sb) &&
+	       gdb_num >= le32_to_cpu(EXT4_SB(sb)->s_es->s_first_meta_bg);
+}
+
 #define outside(b, first, last)	((b) < (first) || (b) >= (last))
 #define inside(b, first, last)	((b) >= (first) && (b) < (last))
 
@@ -538,13 +549,11 @@ static int setup_new_flex_group_blocks(struct super_block *sb,
 	ext4_group_t group, count;
 	struct buffer_head *bh = NULL;
 	int reserved_gdb, i, j, err = 0, err2;
-	int meta_bg;
 
 	BUG_ON(!flex_gd->count || !group_data ||
 	       group_data[0].group != sbi->s_groups_count);
 
 	reserved_gdb = le16_to_cpu(es->s_reserved_gdt_blocks);
-	meta_bg = ext4_has_feature_meta_bg(sb);
 
 	/* This transaction may be extended/restarted along the way */
 	handle = ext4_journal_start_sb(sb, EXT4_HT_RESIZE, EXT4_MAX_TRANS_DATA);
@@ -559,10 +568,14 @@ static int setup_new_flex_group_blocks(struct super_block *sb,
 		gdblocks = ext4_bg_num_gdb(sb, group);
 		start = ext4_group_first_block_no(sb, group);
 
-		if (meta_bg == 0 && !ext4_bg_has_super(sb, group))
-			goto handle_itb;
-
-		if (meta_bg == 1)
+		/*
+		 * Only groups covered by the traditional GDT layout carry
+		 * backups of the traditional GDT blocks; meta_bg descriptor
+		 * blocks are handled by add_new_gdb_meta_bg() and
+		 * update_backups().
+		 */
+		if (ext4_gdb_is_meta_bg(sb, group / EXT4_DESC_PER_BLOCK(sb)) ||
+		    !ext4_bg_has_super(sb, group))
 			goto handle_itb;
 
 		block = start + ext4_bg_has_super(sb, group);
@@ -1159,6 +1172,15 @@ static void update_backups(struct super_block *sb, sector_t blk_off, char *data,
 	if (meta_bg == 0) {
 		group = ext4_list_backups(sb, &three, &five, &seven);
 		last = sbi->s_groups_count;
+		/*
+		 * Superblock backups live in every backup group, but with
+		 * meta_bg only the groups below s_first_meta_bg hold copies
+		 * of the traditional GDT blocks.
+		 */
+		if (data != (char *)sbi->s_es && ext4_has_feature_meta_bg(sb))
+			last = min_t(ext4_group_t, last,
+				     le32_to_cpu(sbi->s_es->s_first_meta_bg) *
+				     EXT4_DESC_PER_BLOCK(sb));
 	} else {
 		group = ext4_get_group_number(sb, blk_off) + 1;
 		last = (ext4_group_t)(group + EXT4_DESC_PER_BLOCK(sb) - 2);
@@ -1207,12 +1229,15 @@ static void update_backups(struct super_block *sb, sector_t blk_off, char *data,
 			ext4_std_error(sb, err);
 		brelse(bh);
 
-		if (meta_bg == 0)
+		if (meta_bg == 0) {
 			group = ext4_list_backups(sb, &three, &five, &seven);
-		else if (group == last)
+			if (group >= last)
+				break;
+		} else if (group == last) {
 			break;
-		else
+		} else {
 			group = last;
+		}
 	}
 	if ((err2 = ext4_journal_stop(handle)) && !err)
 		err = err2;
@@ -1603,15 +1628,19 @@ exit_journal:
 		int gdb_num = group / EXT4_DESC_PER_BLOCK(sb);
 		int gdb_num_end = ((group + flex_gd->count - 1) /
 				   EXT4_DESC_PER_BLOCK(sb));
-		int meta_bg = ext4_has_feature_meta_bg(sb) &&
-			      gdb_num >= le32_to_cpu(es->s_first_meta_bg);
-		sector_t padding_blocks = meta_bg ? 0 : sbi->s_sbh->b_blocknr -
-					 ext4_group_first_block_no(sb, 0);
 
 		update_backups(sb, ext4_group_first_block_no(sb, 0),
 			       (char *)es, sizeof(struct ext4_super_block), 0);
+		/*
+		 * A flex group may straddle s_first_meta_bg, so the layout
+		 * of each descriptor block has to be checked separately.
+		 */
 		for (; gdb_num <= gdb_num_end; gdb_num++) {
 			struct buffer_head *gdb_bh;
+			int meta_bg = ext4_gdb_is_meta_bg(sb, gdb_num);
+			sector_t padding_blocks = meta_bg ? 0 :
+				sbi->s_sbh->b_blocknr -
+				ext4_group_first_block_no(sb, 0);
 
 			gdb_bh = sbi_array_rcu_deref(sbi, s_group_desc,
 						     gdb_num);
