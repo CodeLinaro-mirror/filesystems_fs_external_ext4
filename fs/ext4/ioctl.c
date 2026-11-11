@@ -110,7 +110,8 @@ out_err:
  *
  * Returns: 0 when no modification was done (no superblock in the group)
  *	    1 when the modification was successful
- *	   <0 on error
+ *	   <0 on error (-EFSBADCRC if the backup superblock has an invalid
+ *	      checksum and was skipped)
  */
 static int ext4_update_backup_sb(struct super_block *sb,
 				 handle_t *handle, ext4_group_t grp,
@@ -159,7 +160,12 @@ static int ext4_update_backup_sb(struct super_block *sb,
 		ext4_msg(sb, KERN_ERR, "Invalid checksum for backup "
 		"superblock %llu", sb_block);
 		unlock_buffer(bh);
-		goto out_bh;
+		/*
+		 * Let the caller skip this backup; don't report it via
+		 * ext4_std_error() since it must not abort the update.
+		 */
+		brelse(bh);
+		return -EFSBADCRC;
 	}
 	func(EXT4_SB(sb), es, arg);
 	if (ext4_has_feature_metadata_csum(sb))

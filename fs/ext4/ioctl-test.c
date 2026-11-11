@@ -830,6 +830,52 @@ static void test_update_superblocks_and_overhead(struct kunit *test)
 }
 
 /*
+ * Verify that a backup superblock with an invalid checksum is reported as
+ * -EFSBADCRC (and left untouched) rather than counted as updated, and that
+ * ext4_update_superblocks_fn still updates the remaining backups.
+ */
+static void test_update_backup_sb_bad_csum(struct kunit *test)
+{
+	struct ioctl_test_ctx *ctx = test->priv;
+	struct super_block *sb = ctx->sb;
+	static const ext4_group_t good_grps[] = { 1, 5, 7 };
+	char new_label[EXT4_LABEL_MAX] = "csum_label";
+	struct ext4_super_block *bad;
+	int i;
+
+	bad = (struct ext4_super_block *)ctx->backup_sb_bufs[3];
+	bad->s_checksum = cpu_to_le32(~le32_to_cpu(bad->s_checksum));
+
+	ctx->sync_bh_calls = 0;
+	KUNIT_EXPECT_EQ(test,
+			ext4_update_backup_sb_test(sb, NULL, 3,
+						   ext4_sb_setlabel_test,
+						   new_label),
+			-EFSBADCRC);
+	KUNIT_EXPECT_EQ(test, ctx->sync_bh_calls, 0);
+	KUNIT_EXPECT_MEMNEQ(test, bad->s_volume_name, new_label,
+			    EXT4_LABEL_MAX);
+
+	/* Primary + backups 1, 5 and 7 are updated; backup 3 is skipped */
+	KUNIT_EXPECT_EQ(test,
+			ext4_update_superblocks_fn_test(sb,
+							ext4_sb_setlabel_test,
+							new_label),
+			0);
+	KUNIT_EXPECT_EQ(test, ctx->sync_bh_calls, 4);
+	KUNIT_EXPECT_MEMNEQ(test, bad->s_volume_name, new_label,
+			    EXT4_LABEL_MAX);
+	for (i = 0; i < ARRAY_SIZE(good_grps); i++) {
+		struct ext4_super_block *bes;
+
+		bes = (struct ext4_super_block *)
+			ctx->backup_sb_bufs[good_grps[i]];
+		KUNIT_EXPECT_MEMEQ(test, bes->s_volume_name, new_label,
+				   EXT4_LABEL_MAX);
+	}
+}
+
+/*
  * Verify swap_inode_data swaps i_data, i_disksize, i_size, i_version,
  * atime/mtime, and EXT4_FL_SHOULD_SWAP flags while preserving non-swapped
  * flags, clears both extent-status caches, and restores exact state when
@@ -1220,6 +1266,7 @@ static struct kunit_case ioctl_test_cases[] = {
 	KUNIT_CASE(test_validate_tune_sb_params),
 	KUNIT_CASE(test_tune_sb_mount_opts_guard),
 	KUNIT_CASE(test_update_superblocks_and_overhead),
+	KUNIT_CASE(test_update_backup_sb_bad_csum),
 	KUNIT_CASE(test_swap_inode_data_and_seed),
 	KUNIT_CASE(test_immutable_dax_and_fileattr),
 	KUNIT_CASE(test_force_shutdown_and_ioctl_dispatch),
