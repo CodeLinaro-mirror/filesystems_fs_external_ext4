@@ -134,6 +134,7 @@ static ssize_t trigger_test_error(struct ext4_sb_info *sbi,
 static ssize_t err_report_sec_store(struct ext4_sb_info *sbi,
 				    const char *buf, size_t count)
 {
+	static DEFINE_MUTEX(err_report_sec_mutex);
 	unsigned long t;
 	int ret;
 
@@ -145,19 +146,23 @@ static ssize_t err_report_sec_store(struct ext4_sb_info *sbi,
 	if (t > (365*24*60*60))
 		return -EINVAL;
 
+	mutex_lock(&err_report_sec_mutex);
 	if (sbi->s_err_report_sec == t)		/*nothing to do*/
 		goto out;
-	else if (!sbi->s_err_report_sec && t) {
-		timer_setup(&sbi->s_err_report, print_daily_error_info, 0);
-	} else if (sbi->s_err_report_sec && !t) {
-		timer_delete_sync(&sbi->s_err_report);
-		goto out;
-	}
 
-	sbi->s_err_report_sec = t;
-	mod_timer(&sbi->s_err_report, jiffies + secs_to_jiffies(sbi->s_err_report_sec));
+	WRITE_ONCE(sbi->s_err_report_sec, t);
+	/*
+	 * The timer is initialized at mount time.  Only (re)arm it if errors
+	 * have been recorded; otherwise ext4_update_super() will start it
+	 * when the first error is written to the superblock.
+	 */
+	if (!t)
+		timer_delete_sync(&sbi->s_err_report);
+	else if (sbi->s_es->s_error_count)
+		mod_timer(&sbi->s_err_report, jiffies + secs_to_jiffies(t));
 
 out:
+	mutex_unlock(&err_report_sec_mutex);
 	return count;
 }
 

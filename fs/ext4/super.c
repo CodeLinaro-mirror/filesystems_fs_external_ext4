@@ -3798,6 +3798,7 @@ void print_daily_error_info(struct timer_list *t)
 	struct ext4_sb_info *sbi = timer_container_of(sbi, t, s_err_report);
 	struct super_block *sb = sbi->s_sb;
 	struct ext4_super_block *es = sbi->s_es;
+	unsigned long err_report_sec;
 
 	if (es->s_error_count)
 		/* fsck newer than v1.41.13 is needed to clean this condition. */
@@ -3834,8 +3835,10 @@ void print_daily_error_info(struct timer_list *t)
 		printk(KERN_CONT "\n");
 	}
 
-	if (sbi->s_err_report_sec)
-		mod_timer(&sbi->s_err_report, jiffies + secs_to_jiffies(sbi->s_err_report_sec));
+	err_report_sec = READ_ONCE(sbi->s_err_report_sec);
+	if (err_report_sec)
+		mod_timer(&sbi->s_err_report,
+			  jiffies + secs_to_jiffies(err_report_sec));
 }
 
 /* Find next suitable group and run ext4_init_inode_table */

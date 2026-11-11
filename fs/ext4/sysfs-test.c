@@ -497,6 +497,60 @@ static void test_validated_rw_attrs(struct kunit *test)
 			(ssize_t)-EINVAL);
 }
 
+static void test_err_report_sec_timer(struct kunit *test)
+{
+	struct sysfs_test_ctx *ctx = test->priv;
+	struct ext4_sb_info *sbi = &ctx->sbi;
+	struct ext4_super_block *es = &ctx->es;
+	char *buf;
+
+	buf = kunit_kzalloc(test, PAGE_SIZE, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, buf);
+
+	/* Mount-time default; no errors recorded yet */
+	sbi->s_err_report_sec = 86400;
+	es->s_error_count = 0;
+
+	/* Changing the interval on a clean fs must not arm the timer */
+	KUNIT_EXPECT_EQ(test,
+			ext4_sysfs_attr_store_test(sbi, "err_report_sec",
+						   "3600", 4),
+			(ssize_t)4);
+	KUNIT_EXPECT_EQ(test, sbi->s_err_report_sec, 3600UL);
+	KUNIT_EXPECT_FALSE(test, timer_pending(&sbi->s_err_report));
+
+	/* With recorded errors a new interval (re)arms the timer */
+	es->s_error_count = cpu_to_le32(1);
+	KUNIT_EXPECT_EQ(test,
+			ext4_sysfs_attr_store_test(sbi, "err_report_sec",
+						   "7200", 4),
+			(ssize_t)4);
+	KUNIT_EXPECT_EQ(test, sbi->s_err_report_sec, 7200UL);
+	KUNIT_EXPECT_TRUE(test, timer_pending(&sbi->s_err_report));
+
+	/* Writing 0 disables the timer and is reflected on read */
+	KUNIT_EXPECT_EQ(test,
+			ext4_sysfs_attr_store_test(sbi, "err_report_sec",
+						   "0", 1),
+			(ssize_t)1);
+	KUNIT_EXPECT_EQ(test, sbi->s_err_report_sec, 0UL);
+	KUNIT_EXPECT_FALSE(test, timer_pending(&sbi->s_err_report));
+	KUNIT_EXPECT_GT(test,
+			ext4_sysfs_attr_show_test(sbi, "err_report_sec", buf),
+			(ssize_t)0);
+	KUNIT_EXPECT_STREQ(test, buf, "0\n");
+
+	/* Re-enabling with the old value re-arms the existing timer */
+	KUNIT_EXPECT_EQ(test,
+			ext4_sysfs_attr_store_test(sbi, "err_report_sec",
+						   "7200", 4),
+			(ssize_t)4);
+	KUNIT_EXPECT_EQ(test, sbi->s_err_report_sec, 7200UL);
+	KUNIT_EXPECT_TRUE(test, timer_pending(&sbi->s_err_report));
+	KUNIT_EXPECT_TRUE(test,
+			  sbi->s_err_report.function == sysfs_test_err_timer);
+}
+
 static void test_computed_ro_and_error_time_attrs(struct kunit *test)
 {
 	struct sysfs_test_ctx *ctx = test->priv;
@@ -661,6 +715,7 @@ static void test_sysfs_register_notify_and_unregister(struct kunit *test)
 static struct kunit_case ext4_sysfs_test_cases[] = {
 	KUNIT_CASE(test_generic_pointer_attrs),
 	KUNIT_CASE(test_validated_rw_attrs),
+	KUNIT_CASE(test_err_report_sec_timer),
 	KUNIT_CASE(test_computed_ro_and_error_time_attrs),
 	KUNIT_CASE(test_feature_attrs_and_trigger_error),
 	KUNIT_CASE(test_sysfs_register_notify_and_unregister),
