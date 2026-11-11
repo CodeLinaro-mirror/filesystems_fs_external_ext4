@@ -1392,8 +1392,20 @@ static void ext4_sb_setparams(struct ext4_sb_info *sbi,
 		es->s_feature_ro_compat &=
 			~cpu_to_le32(params->clear_feature_ro_compat_mask);
 		if (params->set_feature_compat_mask &
-		    EXT4_FEATURE_COMPAT_DIR_INDEX)
+		    EXT4_FEATURE_COMPAT_DIR_INDEX) {
+			int i;
+
 			es->s_def_hash_version = sbi->s_def_hash_version;
+			for (i = 0; i < ARRAY_SIZE(es->s_hash_seed); i++)
+				es->s_hash_seed[i] =
+					cpu_to_le32(sbi->s_hash_seed[i]);
+			if (!(es->s_flags &
+			      cpu_to_le32(EXT2_FLAGS_UNSIGNED_HASH |
+					  EXT2_FLAGS_SIGNED_HASH)))
+				es->s_flags |= sbi->s_hash_unsigned ?
+					cpu_to_le32(EXT2_FLAGS_UNSIGNED_HASH) :
+					cpu_to_le32(EXT2_FLAGS_SIGNED_HASH);
+		}
 		if (params->set_feature_incompat_mask &
 		    EXT4_FEATURE_INCOMPAT_CSUM_SEED)
 			es->s_checksum_seed = cpu_to_le32(sbi->s_csum_seed);
@@ -1488,10 +1500,11 @@ static int ext4_validate_tune_sb_params(struct super_block *sb,
 				sbi->s_def_hash_version = params->def_hash_alg;
 			else if (sbi->s_def_hash_version == 0)
 				sbi->s_def_hash_version = DX_HASH_HALF_MD4;
-			if (!(es->s_flags &
-			      cpu_to_le32(EXT2_FLAGS_UNSIGNED_HASH)) &&
-			    !(es->s_flags &
-			      cpu_to_le32(EXT2_FLAGS_SIGNED_HASH))) {
+			if (es->s_flags &
+			    cpu_to_le32(EXT2_FLAGS_UNSIGNED_HASH)) {
+				sbi->s_hash_unsigned = 3;
+			} else if (!(es->s_flags &
+				     cpu_to_le32(EXT2_FLAGS_SIGNED_HASH))) {
 #ifdef __CHAR_UNSIGNED__
 				sbi->s_hash_unsigned = 3;
 #else

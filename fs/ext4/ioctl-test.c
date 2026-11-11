@@ -749,6 +749,65 @@ static void test_tune_sb_mount_opts_guard(struct kunit *test)
 }
 
 /*
+ * Verify that enabling DIR_INDEX online persists the (possibly freshly
+ * generated) hash seed and the hash signedness flag to the superblock, and
+ * that an existing signedness flag in s_flags is honored in memory.
+ */
+static void test_tune_sb_dir_index_hash_state(struct kunit *test)
+{
+	struct ioctl_test_ctx *ctx = test->priv;
+	struct super_block *sb = ctx->sb;
+	struct ext4_sb_info *sbi = &ctx->sbi;
+	struct ext4_super_block *es = ctx->es;
+	struct ext4_tune_sb_params params;
+	__le32 hash_flags;
+	uuid_t uu;
+	int i;
+
+	memset(sbi->s_hash_seed, 0, sizeof(sbi->s_hash_seed));
+	memset(es->s_hash_seed, 0, sizeof(es->s_hash_seed));
+	sbi->s_def_hash_version = 0;
+	es->s_flags = 0;
+
+	memset(&params, 0, sizeof(params));
+	params.set_flags = EXT4_TUNE_FL_FEATURES;
+	params.feature_compat = le32_to_cpu(es->s_feature_compat) |
+				EXT4_FEATURE_COMPAT_DIR_INDEX;
+	params.feature_incompat = le32_to_cpu(es->s_feature_incompat);
+	params.feature_ro_compat = le32_to_cpu(es->s_feature_ro_compat);
+	KUNIT_ASSERT_EQ(test, ext4_validate_tune_sb_params_test(sb, &params),
+			0);
+	ext4_sb_setparams_test(sbi, es, &params);
+
+	KUNIT_EXPECT_TRUE(test, ext4_has_feature_dir_index(sb));
+	KUNIT_EXPECT_EQ(test, es->s_def_hash_version, DX_HASH_HALF_MD4);
+	memcpy(&uu, es->s_hash_seed, UUID_SIZE);
+	KUNIT_EXPECT_FALSE(test, uuid_is_null(&uu));
+	for (i = 0; i < ARRAY_SIZE(es->s_hash_seed); i++)
+		KUNIT_EXPECT_EQ(test, le32_to_cpu(es->s_hash_seed[i]),
+				sbi->s_hash_seed[i]);
+	hash_flags = es->s_flags & cpu_to_le32(EXT2_FLAGS_UNSIGNED_HASH |
+					       EXT2_FLAGS_SIGNED_HASH);
+	KUNIT_EXPECT_EQ(test, le32_to_cpu(hash_flags),
+			sbi->s_hash_unsigned ? EXT2_FLAGS_UNSIGNED_HASH :
+					       EXT2_FLAGS_SIGNED_HASH);
+
+	/* An existing unsigned-hash flag must be honored in memory */
+	ext4_clear_feature_dir_index(sb);
+	es->s_flags = cpu_to_le32(EXT2_FLAGS_UNSIGNED_HASH);
+	sbi->s_hash_unsigned = 0;
+	memset(&params, 0, sizeof(params));
+	params.set_flags = EXT4_TUNE_FL_EDIT_FEATURES;
+	params.set_feature_compat_mask = EXT4_FEATURE_COMPAT_DIR_INDEX;
+	KUNIT_ASSERT_EQ(test, ext4_validate_tune_sb_params_test(sb, &params),
+			0);
+	KUNIT_EXPECT_EQ(test, sbi->s_hash_unsigned, 3U);
+	ext4_sb_setparams_test(sbi, es, &params);
+	KUNIT_EXPECT_EQ(test, le32_to_cpu(es->s_flags),
+			EXT2_FLAGS_UNSIGNED_HASH);
+}
+
+/*
  * Verify ext4_update_backup_sb, ext4_update_superblocks_fn, and
  * ext4_update_overhead across primary + 4 sparse_super backup groups (1, 3,
  * 5, 7), covering both journaled (first 2 backups) and unjournaled (remaining
@@ -1272,6 +1331,7 @@ static struct kunit_case ioctl_test_cases[] = {
 	KUNIT_CASE(test_sb_callbacks_and_setparams),
 	KUNIT_CASE(test_validate_tune_sb_params),
 	KUNIT_CASE(test_tune_sb_mount_opts_guard),
+	KUNIT_CASE(test_tune_sb_dir_index_hash_state),
 	KUNIT_CASE(test_update_superblocks_and_overhead),
 	KUNIT_CASE(test_update_backup_sb_bad_csum),
 	KUNIT_CASE(test_swap_inode_data_and_seed),
