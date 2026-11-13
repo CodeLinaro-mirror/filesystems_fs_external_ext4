@@ -2632,6 +2632,24 @@ static inline unsigned int ext4_dir_rec_len(__u8 name_len,
 	return (rec_len & ~EXT4_DIR_ROUND);
 }
 
+static inline bool ext4_is_fake_dir_entry(const struct ext4_dir_entry_2 *de)
+{
+	/* Check if . or .. , or skip if namelen is 0 */
+	if ((de->name_len == 1 && de->name[0] == '.') ||
+	    (de->name_len == 2 && de->name[0] == '.' && de->name[1] == '.'))
+		return true;
+	/* Check if this is a csum entry */
+	if (de->file_type == EXT4_FT_DIR_CSUM)
+		return true;
+	return false;
+}
+
+static inline bool ext4_dirent_has_hash(const struct inode *dir,
+					const struct ext4_dir_entry_2 *de)
+{
+	return ext4_hash_in_dirent(dir) && !ext4_is_fake_dir_entry(de);
+}
+
 static inline unsigned int
 ext4_rec_len_from_disk(__le16 dlen, unsigned blocksize)
 {

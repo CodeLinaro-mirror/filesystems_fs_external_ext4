@@ -126,6 +126,7 @@ static void init_mock_inode_slot(struct namei_test_ctx *ctx,
 
 	spin_lock_init(&inode->i_lock);
 	init_rwsem(&inode->i_rwsem);
+	i_size_ordered_init(inode);
 	INIT_LIST_HEAD(&inode->i_io_list);
 	INIT_LIST_HEAD(&inode->i_wb_list);
 	INIT_LIST_HEAD(&inode->i_lru);
@@ -2313,6 +2314,133 @@ static void test_namei_casefold_lookup_and_strict(struct kunit *test)
 }
 #endif /* CONFIG_UNICODE */
 
+#ifdef CONFIG_FS_ENCRYPTION
+static int namei_test_get_context(struct inode *inode, void *ctx, size_t len)
+{
+	return -ERANGE;
+}
+
+static const struct fscrypt_operations namei_test_cryptops = {
+	.inode_info_offs	= (int)offsetof(struct ext4_inode_info,
+						i_crypt_info) -
+				  (int)offsetof(struct ext4_inode_info,
+						vfs_inode),
+	.get_context		= namei_test_get_context,
+};
+#endif
+
+/*
+ * Verify dx_make_map() and htree_dirblock_to_tree() never read stored hashes
+ * from fake entries ('.', '..', EXT4_FT_DIR_CSUM) in encrypted+casefolded dirs.
+ */
+static void test_namei_fake_dirent_hash_bounds(struct kunit *test)
+{
+	struct namei_test_ctx *ctx = test->priv;
+	struct inode *dir = get_mock_inode(ctx, TEST_DIR_INO);
+	struct buffer_head *bh, *bh2;
+	struct ext4_dir_entry_2 *de;
+	struct dx_hash_info hinfo = {
+		.hash_version = DX_HASH_SIPHASH,
+		.seed = ctx->sbi.s_hash_seed,
+	};
+	struct dx_map_entry *map;
+	char *exact_buf, *saved_data;
+	int count;
+
+	exact_buf = kunit_kzalloc(test, TEST_BLK_SIZE, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, exact_buf);
+
+	bh = map_and_get_dir_bh(ctx, dir, 0);
+	bh2 = map_and_get_dir_bh(ctx, dir, 1);
+	KUNIT_ASSERT_NOT_NULL(test, bh);
+	KUNIT_ASSERT_NOT_NULL(test, bh2);
+	saved_data = bh->b_data;
+	bh->b_data = exact_buf;
+
+	ext4_clear_feature_metadata_csum(&ctx->sb);
+	ext4_clear_inode_flag(dir, EXT4_INODE_INDEX);
+	dir->i_flags |= S_CASEFOLD | S_ENCRYPTED;
+	i_size_write(dir, TEST_BLK_SIZE);
+
+	/*
+	 * 12-byte '.' and '..' followed by a real entry with stored hash:
+	 * dx_make_map() must assign hash 0 to '.' and '..' instead of reading
+	 * the following entry's inode/rec_len as a hash trailer.
+	 */
+	de = (struct ext4_dir_entry_2 *)exact_buf;
+	de->inode = cpu_to_le32(TEST_DIR_INO);
+	de->rec_len = ext4_rec_len_to_disk(12, TEST_BLK_SIZE);
+	de->name_len = 1;
+	de->file_type = EXT4_FT_DIR;
+	memcpy(de->name, ".", 2);
+
+	de = (struct ext4_dir_entry_2 *)(exact_buf + 12);
+	de->inode = cpu_to_le32(TEST_ROOT_INO);
+	de->rec_len = ext4_rec_len_to_disk(12, TEST_BLK_SIZE);
+	de->name_len = 2;
+	de->file_type = EXT4_FT_DIR;
+	memcpy(de->name, "..", 3);
+
+	de = (struct ext4_dir_entry_2 *)(exact_buf + 24);
+	de->inode = cpu_to_le32(TEST_FILE1_INO);
+	de->rec_len = ext4_rec_len_to_disk(TEST_BLK_SIZE - 24, TEST_BLK_SIZE);
+	de->name_len = 16;
+	de->file_type = EXT4_FT_REG_FILE;
+	memcpy(de->name, "0123456789abcdef", 16);
+	EXT4_DIRENT_HASHES(de)->hash = cpu_to_le32(0x11223344U);
+	EXT4_DIRENT_HASHES(de)->minor_hash = cpu_to_le32(0x55667788U);
+
+	map = (struct dx_map_entry *)(bh2->b_data + TEST_BLK_SIZE);
+	count = dx_make_map_test(dir, bh, &hinfo, map);
+	KUNIT_ASSERT_EQ(test, count, 3);
+	map -= count;
+	/* map[2] = '.', map[1] = '..', map[0] = 'file1' */
+	KUNIT_EXPECT_EQ(test, map[2].hash, 0U);
+	KUNIT_EXPECT_EQ(test, map[1].hash, 0U);
+	KUNIT_EXPECT_EQ(test, map[0].hash, 0x11223344U);
+
+	/* Crafted EXT4_FT_DIR_CSUM at exact block end must fail validation */
+	de->rec_len = ext4_rec_len_to_disk(TEST_BLK_SIZE - 24 - 20,
+					   TEST_BLK_SIZE);
+	de = (struct ext4_dir_entry_2 *)(exact_buf + TEST_BLK_SIZE - 20);
+	de->inode = cpu_to_le32(TEST_FILE2_INO);
+	de->rec_len = ext4_rec_len_to_disk(20, TEST_BLK_SIZE);
+	de->name_len = 12;
+	de->file_type = EXT4_FT_DIR_CSUM;
+	memcpy(de->name, "crafted_csum", 12);
+
+	map = (struct dx_map_entry *)(bh2->b_data + TEST_BLK_SIZE);
+	KUNIT_EXPECT_EQ(test, dx_make_map_test(dir, bh, &hinfo, map),
+			-EFSCORRUPTED);
+
+#ifdef CONFIG_FS_ENCRYPTION
+	{
+		struct file dir_file = { .f_inode = dir };
+		struct dir_private_info *info;
+		__u32 next_hash = 0;
+
+		ctx->sb.s_cop = &namei_test_cryptops;
+		info = kzalloc_obj(*info, GFP_KERNEL);
+		KUNIT_ASSERT_NOT_NULL(test, info);
+		dir_file.private_data = info;
+
+		/*
+		 * htree_dirblock_to_tree() must store '.', '..', and the
+		 * regular entry without falling into SipHash or over-reading
+		 * the crafted CSUM entry at exact block end.
+		 */
+		count = ext4_htree_fill_tree(&dir_file, 0, 0, &next_hash);
+		KUNIT_EXPECT_EQ(test, count, 3);
+		ext4_htree_free_dir_info(info);
+		ctx->sb.s_cop = &ext4_cryptops;
+	}
+#endif
+
+	dir->i_flags &= ~(S_CASEFOLD | S_ENCRYPTED);
+	ext4_set_feature_metadata_csum(&ctx->sb);
+	bh->b_data = saved_data;
+}
+
 static struct kunit_case namei_test_cases[] = {
 	KUNIT_CASE(test_namei_dirent_tail_and_csum),
 	KUNIT_CASE(test_namei_dx_helpers_and_csum),
@@ -2329,6 +2457,7 @@ static struct kunit_case namei_test_cases[] = {
 	KUNIT_CASE(test_namei_nlink_and_lookup_parent),
 	KUNIT_CASE(test_namei_link_unlink_and_rmdir),
 	KUNIT_CASE(test_namei_rename_and_exchange),
+	KUNIT_CASE(test_namei_fake_dirent_hash_bounds),
 #if IS_ENABLED(CONFIG_UNICODE)
 	KUNIT_CASE(test_namei_casefold_lookup_and_strict),
 #endif

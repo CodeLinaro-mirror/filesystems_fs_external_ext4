@@ -1672,6 +1672,20 @@ static void test_inline_dir_lifecycle_and_operations(struct kunit *test)
 					     &has_inline_data);
 		KUNIT_EXPECT_GE(test, ret, 0);
 		ext4_htree_free_dir_info(info);
+
+		/*
+		 * Casefolded + encrypted inline directory must not read
+		 * uninitialized/OOB EXT4_DIRENT_HASH() bytes on '.' / '..'.
+		 */
+		dir->i_flags |= S_CASEFOLD | S_ENCRYPTED;
+		info = kzalloc_obj(*info, GFP_KERNEL);
+		KUNIT_ASSERT_NOT_ERR_OR_NULL(test, info);
+		env->filp.private_data = info;
+		ret = ext4_inlinedir_to_tree(&env->filp, dir, 0, &hinfo,
+					     0, 0, &has_inline_data);
+		KUNIT_EXPECT_GE(test, ret, 2);
+		ext4_htree_free_dir_info(info);
+		dir->i_flags &= ~(S_CASEFOLD | S_ENCRYPTED);
 	}
 
 	/*

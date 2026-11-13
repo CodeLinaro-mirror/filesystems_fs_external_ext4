@@ -87,6 +87,21 @@ enum dir_htree_stub_mode {
 static const struct super_operations dir_test_sops = {
 };
 
+#ifdef CONFIG_FS_ENCRYPTION
+static int dir_test_get_context(struct inode *inode, void *ctx, size_t len)
+{
+	return -ERANGE;
+}
+
+static const struct fscrypt_operations dir_test_cryptops = {
+	.inode_info_offs	= (int)offsetof(struct ext4_inode_info,
+						i_crypt_info) -
+				  (int)offsetof(struct ext4_inode_info,
+						vfs_inode),
+	.get_context		= dir_test_get_context,
+};
+#endif
+
 static void init_mock_dir_file(struct dir_test_ctx *ctx, fmode_t extra_mode)
 {
 	struct inode *dir = &ctx->dir_ei.vfs_inode;
@@ -971,6 +986,147 @@ static void test_dx_readdir(struct kunit *test)
 	ctx->filp.private_data = NULL;
 }
 
+/*
+ * Test 7: Verify fake directory entries ('.', '..', EXT4_FT_DIR_CSUM) never
+ * trigger out-of-bounds EXT4_DIRENT_HASH() reads in encrypted+casefolded dirs,
+ * and crafted EXT4_FT_DIR_CSUM entries with nonzero inode/name_len are rejected.
+ */
+static void test_fake_dirent_hash_bounds(struct kunit *test)
+{
+	struct dir_test_ctx *ctx = test->priv;
+	struct inode *dir = &ctx->dir_ei.vfs_inode;
+	struct buffer_head *bh;
+	struct ext4_dir_entry_2 *de;
+	char *exact_buf, *saved_data;
+
+	exact_buf = kunit_kzalloc(test, DIR_TEST_BLK_SIZE, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, exact_buf);
+
+	bh = alloc_dir_lblk(ctx, 0);
+	KUNIT_ASSERT_NOT_NULL(test, bh);
+	saved_data = bh->b_data;
+	bh->b_data = exact_buf;
+
+	ext4_clear_feature_metadata_csum(&ctx->sb);
+	ext4_clear_inode_flag(dir, EXT4_INODE_INDEX);
+	dir->i_flags |= S_CASEFOLD | S_ENCRYPTED;
+	i_size_write(dir, DIR_TEST_BLK_SIZE);
+	dir->i_blocks = DIR_TEST_BLK_SIZE >> 9;
+
+	/* Helper checks */
+	write_de(exact_buf, 0, DIR_TEST_DIR_INO, 12, EXT4_FT_DIR, ".");
+	de = (struct ext4_dir_entry_2 *)exact_buf;
+	KUNIT_EXPECT_TRUE(test, ext4_is_fake_dir_entry(de));
+	KUNIT_EXPECT_FALSE(test, ext4_dirent_has_hash(dir, de));
+
+	write_de(exact_buf, 12, DIR_TEST_ROOT_INO, 12, EXT4_FT_DIR, "..");
+	de = (struct ext4_dir_entry_2 *)(exact_buf + 12);
+	KUNIT_EXPECT_TRUE(test, ext4_is_fake_dir_entry(de));
+	KUNIT_EXPECT_FALSE(test, ext4_dirent_has_hash(dir, de));
+
+	write_de(exact_buf, 24, 15, 24, EXT4_FT_REG_FILE, "file");
+	de = (struct ext4_dir_entry_2 *)(exact_buf + 24);
+	KUNIT_EXPECT_FALSE(test, ext4_is_fake_dir_entry(de));
+	KUNIT_EXPECT_TRUE(test, ext4_dirent_has_hash(dir, de));
+
+	/*
+	 * 1. Crafted EXT4_FT_DIR_CSUM at exact block end (DIR_TEST_BLK_SIZE - 20)
+	 * with nonzero inode and name_len=12 must be rejected.
+	 */
+	memset(exact_buf, 0, DIR_TEST_BLK_SIZE);
+	write_de(exact_buf, 0, DIR_TEST_DIR_INO, DIR_TEST_BLK_SIZE - 20,
+		 EXT4_FT_DIR, ".");
+	write_de(exact_buf, DIR_TEST_BLK_SIZE - 20, 15, 20,
+		 EXT4_FT_DIR_CSUM, "crafted_csum");
+	de = (struct ext4_dir_entry_2 *)(exact_buf + DIR_TEST_BLK_SIZE - 20);
+	KUNIT_EXPECT_TRUE(test, ext4_is_fake_dir_entry(de));
+	KUNIT_EXPECT_FALSE(test, ext4_dirent_has_hash(dir, de));
+	KUNIT_EXPECT_EQ(test, __ext4_check_dir_entry(__func__, __LINE__, dir,
+						     NULL, de, bh, exact_buf,
+						     DIR_TEST_BLK_SIZE,
+						     DIR_TEST_BLK_SIZE - 20),
+			1);
+
+	/* Nonzero inode alone or nonzero name_len alone on CSUM entry rejected */
+	de->name_len = 0;
+	KUNIT_EXPECT_EQ(test, __ext4_check_dir_entry(__func__, __LINE__, dir,
+						     NULL, de, bh, exact_buf,
+						     DIR_TEST_BLK_SIZE,
+						     DIR_TEST_BLK_SIZE - 20),
+			1);
+	de->inode = 0;
+	de->name_len = 1;
+	KUNIT_EXPECT_EQ(test, __ext4_check_dir_entry(__func__, __LINE__, dir,
+						     NULL, de, bh, exact_buf,
+						     DIR_TEST_BLK_SIZE,
+						     DIR_TEST_BLK_SIZE - 20),
+			1);
+	/* Legitimate CSUM tail (inode == 0, name_len == 0) is accepted */
+	de->name_len = 0;
+	KUNIT_EXPECT_EQ(test, __ext4_check_dir_entry(__func__, __LINE__, dir,
+						     NULL, de, bh, exact_buf,
+						     DIR_TEST_BLK_SIZE,
+						     DIR_TEST_BLK_SIZE - 20),
+			0);
+
+#ifdef CONFIG_FS_ENCRYPTION
+	{
+		int err;
+
+		ctx->sb.s_cop = &dir_test_cryptops;
+		KUNIT_ASSERT_EQ(test, ext4_dir_operations.open(dir, &ctx->filp),
+				0);
+
+		/*
+		 * 2a. ext4_readdir() skips crafted CSUM entry at block end
+		 * without an out-of-bounds EXT4_DIRENT_HASH() read.
+		 */
+		write_de(exact_buf, DIR_TEST_BLK_SIZE - 20, 15, 20,
+			 EXT4_FT_DIR_CSUM, "crafted_csum");
+		reset_capture(&ctx->cap, 0, 0);
+		inode_lock_shared(dir);
+		err = ext4_dir_operations.iterate_shared(&ctx->filp,
+							 &ctx->cap.ctx);
+		inode_unlock_shared(dir);
+		KUNIT_ASSERT_EQ(test, err, 0);
+		KUNIT_ASSERT_EQ(test, ctx->cap.count, 1);
+		KUNIT_EXPECT_STREQ(test, ctx->cap.recs[0].name, ".");
+
+		/*
+		 * 2b. 12-byte '..' at the exact end of the allocation must not
+		 * trigger an 8-byte OOB read past exact_buf in ext4_readdir().
+		 */
+		ext4_set_feature_metadata_csum(&ctx->sb);
+		set_buffer_verified(bh);
+		memset(exact_buf, 0, DIR_TEST_BLK_SIZE);
+		write_de(exact_buf, 0, DIR_TEST_DIR_INO, DIR_TEST_BLK_SIZE - 12,
+			 EXT4_FT_DIR, ".");
+		write_de(exact_buf, DIR_TEST_BLK_SIZE - 12, DIR_TEST_ROOT_INO,
+			 12, EXT4_FT_DIR, "..");
+
+		reset_capture(&ctx->cap, 0, 0);
+		inode_lock_shared(dir);
+		err = ext4_dir_operations.iterate_shared(&ctx->filp,
+							 &ctx->cap.ctx);
+		inode_unlock_shared(dir);
+		KUNIT_ASSERT_EQ(test, err, 0);
+		KUNIT_ASSERT_EQ(test, ctx->cap.count, 2);
+		KUNIT_EXPECT_STREQ(test, ctx->cap.recs[0].name, ".");
+		KUNIT_EXPECT_STREQ(test, ctx->cap.recs[1].name, "..");
+
+		KUNIT_EXPECT_EQ(test,
+				ext4_dir_operations.release(dir, &ctx->filp),
+				0);
+		ctx->filp.private_data = NULL;
+		ctx->sb.s_cop = NULL;
+	}
+#endif
+
+	dir->i_flags &= ~(S_CASEFOLD | S_ENCRYPTED);
+	ext4_set_feature_metadata_csum(&ctx->sb);
+	bh->b_data = saved_data;
+}
+
 static struct kunit_case ext4_dir_test_cases[] = {
 	KUNIT_CASE(test_check_dir_entry_and_all_de),
 	KUNIT_CASE(test_dx_detection_and_hash_pos_cookies),
@@ -978,6 +1134,7 @@ static struct kunit_case ext4_dir_test_cases[] = {
 	KUNIT_CASE(test_htree_store_dirent_and_free),
 	KUNIT_CASE(test_linear_readdir),
 	KUNIT_CASE(test_dx_readdir),
+	KUNIT_CASE(test_fake_dirent_hash_bounds),
 	{}
 };
 

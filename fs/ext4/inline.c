@@ -1353,8 +1353,14 @@ int ext4_inlinedir_to_tree(struct file *dir_file,
 		}
 
 		if (ext4_hash_in_dirent(dir)) {
-			hinfo->hash = EXT4_DIRENT_HASH(de);
-			hinfo->minor_hash = EXT4_DIRENT_MINOR_HASH(de);
+			if (de->name_len && de->inode &&
+			    !ext4_is_fake_dir_entry(de)) {
+				hinfo->hash = EXT4_DIRENT_HASH(de);
+				hinfo->minor_hash = EXT4_DIRENT_MINOR_HASH(de);
+			} else {
+				hinfo->hash = 0;
+				hinfo->minor_hash = 0;
+			}
 		} else {
 			err = ext4fs_dirhash(dir, de->name, de->name_len, hinfo);
 			if (err) {

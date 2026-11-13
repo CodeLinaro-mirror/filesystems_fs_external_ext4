@@ -520,7 +520,8 @@ static struct stats dx_show_leaf(struct inode *dir,
 						len = fname_crypto_str.len;
 					}
 					if (IS_CASEFOLDED(dir))
-						h.hash = EXT4_DIRENT_HASH(de);
+						h.hash = ext4_is_fake_dir_entry(de) ?
+							0 : EXT4_DIRENT_HASH(de);
 					else
 						(void) ext4fs_dirhash(dir,
 							de->name,
@@ -924,7 +925,8 @@ static int htree_dirblock_to_tree(struct file *dir_file,
 			break;
 		}
 		if (ext4_hash_in_dirent(dir)) {
-			if (de->name_len && de->inode) {
+			if (de->name_len && de->inode &&
+			    !ext4_is_fake_dir_entry(de)) {
 				hinfo->hash = EXT4_DIRENT_HASH(de);
 				hinfo->minor_hash = EXT4_DIRENT_MINOR_HASH(de);
 			} else {
@@ -1142,9 +1144,12 @@ static int dx_make_map(struct inode *dir, struct buffer_head *bh,
 					 ((char *)de) - base))
 			return -EFSCORRUPTED;
 		if (de->name_len && de->inode) {
-			if (ext4_hash_in_dirent(dir))
-				h.hash = EXT4_DIRENT_HASH(de);
-			else {
+			if (ext4_hash_in_dirent(dir)) {
+				if (!ext4_is_fake_dir_entry(de))
+					h.hash = EXT4_DIRENT_HASH(de);
+				else
+					h.hash = 0;
+			} else {
 				int err = ext4fs_dirhash(dir, de->name,
 						     de->name_len, &h);
 				if (err < 0)
@@ -1278,7 +1283,7 @@ static bool ext4_match(struct inode *parent,
 		 * considering the calculated hash.
 		 */
 		if (sb_no_casefold_compat_fallback(parent->i_sb) &&
-		    IS_ENCRYPTED(parent) && fname->cf_name.name &&
+		    ext4_dirent_has_hash(parent, de) && fname->cf_name.name &&
 		    (fname->hinfo.hash != EXT4_DIRENT_HASH(de) ||
 		     fname->hinfo.minor_hash != EXT4_DIRENT_MINOR_HASH(de)))
 			return false;
@@ -1314,7 +1319,7 @@ int ext4_search_dir(struct buffer_head *bh, char *search_buf, int buf_size,
 		/* this code is executed quadratically often */
 		/* do minimal checking `by hand' */
 		if (de->name + de->name_len <= dlimit &&
-		    (!ext4_hash_in_dirent(dir) ||
+		    (!ext4_dirent_has_hash(dir, de) ||
 		     (char *)de + ext4_dir_rec_len(de->name_len, dir) <= dlimit) &&
 		    ext4_match(dir, fname, de)) {
 			/* found a match - just to be sure, do

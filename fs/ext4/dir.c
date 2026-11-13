@@ -56,18 +56,6 @@ static int is_dx_dir(struct inode *inode)
 	return 0;
 }
 
-static bool is_fake_dir_entry(struct ext4_dir_entry_2 *de)
-{
-	/* Check if . or .. , or skip if namelen is 0 */
-	if ((de->name_len > 0) && (de->name_len <= 2) && (de->name[0] == '.') &&
-	    (de->name[1] == '.' || de->name[1] == '\0'))
-		return true;
-	/* Check if this is a csum entry */
-	if (de->file_type == EXT4_FT_DIR_CSUM)
-		return true;
-	return false;
-}
-
 /*
  * Return 0 if the directory entry is OK, and 1 if there is a problem
  *
@@ -86,7 +74,7 @@ int __ext4_check_dir_entry(const char *function, unsigned int line,
 	const int rlen = ext4_rec_len_from_disk(de->rec_len,
 						dir->i_sb->s_blocksize);
 	const int next_offset = ((char *) de - buf) + rlen;
-	bool fake = is_fake_dir_entry(de);
+	bool fake = ext4_is_fake_dir_entry(de);
 	bool has_csum = ext4_has_feature_metadata_csum(dir->i_sb);
 
 	if (unlikely(rlen < ext4_dir_rec_len(1, fake ? NULL : dir)))
@@ -108,6 +96,9 @@ int __ext4_check_dir_entry(const char *function, unsigned int line,
 	else if (unlikely(next_offset == size && de->name_len == 1 &&
 			  de->name[0] == '.'))
 		error_msg = "'.' directory cannot be the last in data block";
+	else if (unlikely(de->file_type == EXT4_FT_DIR_CSUM &&
+			  (de->inode || de->name_len)))
+		error_msg = "invalid directory checksum entry";
 	else
 		return 0;
 
@@ -303,7 +294,7 @@ static int ext4_readdir(struct file *file, struct dir_context *ctx)
 					u32 hash;
 					u32 minor_hash;
 
-					if (IS_CASEFOLDED(inode)) {
+					if (ext4_dirent_has_hash(inode, de)) {
 						hash = EXT4_DIRENT_HASH(de);
 						minor_hash = EXT4_DIRENT_MINOR_HASH(de);
 					} else {
