@@ -62,6 +62,7 @@ struct inline_test_ctx {
 	int dirty_metadata_calls;
 	int da_get_block_prep_err;
 	int journal_mode;
+	bool es_stats_inited;
 };
 
 static struct inline_test_ctx *t_ctx;
@@ -314,6 +315,24 @@ static int inline_test_init(struct kunit *test)
 	spin_lock_init(&ctx->sbi.s_bdev_wb_lock);
 	spin_lock_init(&ctx->sbi.s_error_lock);
 	spin_lock_init(&ctx->sbi.s_md_lock);
+	spin_lock_init(&ctx->sbi.s_es_lock);
+	INIT_LIST_HEAD(&ctx->sbi.s_es_list);
+	INIT_LIST_HEAD(&ctx->ei.i_orphan);
+	KUNIT_ASSERT_EQ(test,
+			percpu_counter_init(&ctx->sbi.s_dirtyclusters_counter,
+					    0, GFP_KERNEL), 0);
+	KUNIT_ASSERT_EQ(test,
+			percpu_counter_init(&ctx->sbi.s_es_stats.es_stats_cache_hits,
+					    0, GFP_KERNEL), 0);
+	KUNIT_ASSERT_EQ(test,
+			percpu_counter_init(&ctx->sbi.s_es_stats.es_stats_cache_misses,
+					    0, GFP_KERNEL), 0);
+	KUNIT_ASSERT_EQ(test,
+			percpu_counter_init(&ctx->sbi.s_es_stats.es_stats_all_cnt,
+					    0, GFP_KERNEL), 0);
+	KUNIT_ASSERT_EQ(test,
+			percpu_counter_init(&ctx->sbi.s_es_stats.es_stats_shk_cnt,
+					    0, GFP_KERNEL), 0);
 	ratelimit_state_init(&ctx->sbi.s_err_ratelimit_state,
 			     DEFAULT_RATELIMIT_INTERVAL, 0);
 	ratelimit_state_init(&ctx->sbi.s_warning_ratelimit_state,
@@ -380,6 +399,7 @@ static int inline_test_init(struct kunit *test)
 	INIT_LIST_HEAD(&ctx->ei.i_es_list);
 	ctx->ei.i_es_all_nr = 0;
 	ctx->ei.i_es_shk_nr = 0;
+	ctx->es_stats_inited = true;
 
 	reset_inode_state(ctx, S_IFREG | 0644);
 
@@ -414,7 +434,15 @@ static void inline_test_exit(struct kunit *test)
 	if (ctx) {
 		if (!list_empty(&ctx->ei.i_orphan))
 			list_del_init(&ctx->ei.i_orphan);
+		if (ctx->es_stats_inited)
+			ext4_es_remove_extent(&ctx->ei.vfs_inode, 0,
+					      EXT_MAX_BLOCKS);
 		truncate_inode_pages(&ctx->ei.vfs_inode.i_data, 0);
+		percpu_counter_destroy(&ctx->sbi.s_es_stats.es_stats_shk_cnt);
+		percpu_counter_destroy(&ctx->sbi.s_es_stats.es_stats_all_cnt);
+		percpu_counter_destroy(&ctx->sbi.s_es_stats.es_stats_cache_misses);
+		percpu_counter_destroy(&ctx->sbi.s_es_stats.es_stats_cache_hits);
+		percpu_counter_destroy(&ctx->sbi.s_dirtyclusters_counter);
 	}
 	t_ctx = NULL;
 }
@@ -1113,6 +1141,41 @@ static void test_inline_data_truncate(struct kunit *test)
 	ext4_inline_data_truncate(inode, &has_inline);
 	inode_unlock(inode);
 	KUNIT_EXPECT_TRUE(test, list_empty(&ctx->ei.i_orphan));
+
+	/*
+	 * 8. Extending i_size past 4 GiB ((1LL << 32) + 8) must not truncate
+	 * i_size via a 32-bit size_t local, corrupt i_disksize, wipe delayed
+	 * extents, or truncate inline data.
+	 */
+	{
+		struct extent_status es;
+
+		reset_inode_state(ctx, S_IFREG | 0644);
+		ret = create_inline_file(inode, buf, 100);
+		KUNIT_ASSERT_EQ(test, ret, 0);
+		ext4_clear_inode_state(inode, EXT4_STATE_MAY_INLINE_DATA);
+		ctx->ei.i_reserved_data_blocks = 1;
+		ext4_es_insert_delayed_extent(inode, 0, 1, false, false);
+		inode_lock(inode);
+		i_size_write(inode, (1LL << 32) + 8);
+		has_inline = 1;
+		ret = ext4_inline_data_truncate(inode, &has_inline);
+		inode_unlock(inode);
+		KUNIT_EXPECT_EQ(test, ret, 0);
+		KUNIT_EXPECT_EQ(test, has_inline, 1);
+		KUNIT_EXPECT_EQ(test, ctx->ei.i_disksize, (1LL << 32) + 8);
+		KUNIT_EXPECT_EQ(test, ctx->ei.i_inline_size, 100);
+		KUNIT_EXPECT_MEMEQ(test, raw_inline_i_block(ctx), buf,
+				   EXT4_MIN_INLINE_DATA_SIZE);
+		KUNIT_EXPECT_MEMEQ(test, raw_inline_xattr_pos(ctx),
+				   buf + EXT4_MIN_INLINE_DATA_SIZE,
+				   100 - EXT4_MIN_INLINE_DATA_SIZE);
+		KUNIT_EXPECT_TRUE(test,
+				  ext4_es_lookup_extent(inode, 0, NULL, &es,
+							NULL));
+		KUNIT_EXPECT_TRUE(test, ext4_es_is_delayed(&es));
+		ext4_es_remove_extent(inode, 0, EXT_MAX_BLOCKS);
+	}
 }
 
 /* =========================================================================

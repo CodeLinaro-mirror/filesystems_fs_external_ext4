@@ -1877,7 +1877,7 @@ int ext4_inline_data_truncate(struct inode *inode, int *has_inline)
 {
 	handle_t *handle;
 	int inline_size, value_len, needed_blocks, no_expand, err = 0;
-	size_t i_size;
+	loff_t i_size;
 	void *value = NULL;
 	struct ext4_xattr_ibody_find is = {
 		.s = { .not_found = -ENODATA, },
