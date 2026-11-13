@@ -27,6 +27,7 @@
 #include "extents_status.h"
 #include "fast_commit.h"
 #include "namei.h"
+#include "xattr.h"
 
 #define TEST_BLK_SIZE		1024
 #define TEST_BLK_BITS		10
@@ -134,7 +135,13 @@ struct fc_test_ctx {
 	bool use_custom_es_lookup;
 	struct extent_status custom_es;
 	int custom_es_ret;
+
+	/* Deferred EA inode eviction tracking during replay cleanup */
+	bool ea_evicted;
+	bool ea_evict_saw_fc_replay;
 };
+
+static struct fc_test_ctx *fc_active_ctx;
 
 #ifdef CONFIG_QUOTA
 static struct dquot __rcu **fc_test_get_dquots(struct inode *inode)
@@ -152,7 +159,41 @@ static const struct dquot_operations fc_test_qops = {
 };
 #endif
 
+static struct inode *fc_test_alloc_inode(struct super_block *sb)
+{
+	struct ext4_inode_info *ei = kzalloc_obj(*ei, GFP_KERNEL);
+
+	if (!ei)
+		return NULL;
+	inode_init_once(&ei->vfs_inode);
+	return &ei->vfs_inode;
+}
+
+static void fc_test_free_inode(struct inode *inode)
+{
+	kfree(EXT4_I(inode));
+}
+
+static void fc_test_evict_inode(struct inode *inode)
+{
+	struct ext4_sb_info *sbi = EXT4_SB(inode->i_sb);
+
+	if (EXT4_I(inode)->i_flags & EXT4_EA_INODE_FL) {
+		struct fc_test_ctx *ctx = READ_ONCE(fc_active_ctx);
+
+		if (ctx) {
+			WRITE_ONCE(ctx->ea_evicted, true);
+			WRITE_ONCE(ctx->ea_evict_saw_fc_replay,
+				   !!(sbi->s_mount_state & EXT4_FC_REPLAY));
+		}
+	}
+	clear_inode(inode);
+}
+
 static const struct super_operations fc_test_sops = {
+	.alloc_inode	= fc_test_alloc_inode,
+	.free_inode	= fc_test_free_inode,
+	.evict_inode	= fc_test_evict_inode,
 #ifdef CONFIG_QUOTA
 	.get_dquots	= fc_test_get_dquots,
 #endif
@@ -859,6 +900,8 @@ static void fc_cleanup_all(void *priv)
 		ext4_es_destroy_stats(ctx->sbi);
 	}
 	deactivate_super(ctx->sb);
+	rcu_barrier();
+	WRITE_ONCE(fc_active_ctx, NULL);
 }
 
 static int fast_commit_test_init(struct kunit *test)
@@ -884,6 +927,8 @@ static int fast_commit_test_init(struct kunit *test)
 
 	ctx->sb = sb;
 	ctx->sbi = sbi;
+	WRITE_ONCE(fc_active_ctx, ctx);
+	ext4_init_ea_inode_work(sbi);
 	test->priv = ctx;
 
 	/* Superblock and ext4_sb_info setup */
@@ -2206,7 +2251,33 @@ static void test_fc_replay_regions_and_scan(struct kunit *test)
 					    PASS_SCAN, 1, 10),
 			JBD2_FC_REPLAY_STOP);
 	KUNIT_EXPECT_EQ(test, state->fc_replay_num_tags, 2);
-	ext4_fc_replay_cleanup(sb);
+
+	/*
+	 * 6) ext4_fc_replay_cleanup() must drain deferred EA inode iputs
+	 *    while EXT4_FC_REPLAY is still set before clearing replay state.
+	 */
+	{
+		struct inode *ea_inode = new_inode(sb);
+
+		KUNIT_ASSERT_NOT_ERR_OR_NULL(test, ea_inode);
+		ea_inode->i_ino = 500;
+		ea_inode->i_mode = S_IFREG | 0600;
+		clear_nlink(ea_inode);
+		EXT4_I(ea_inode)->i_flags = EXT4_EA_INODE_FL;
+		WRITE_ONCE(ctx->ea_evicted, false);
+		WRITE_ONCE(ctx->ea_evict_saw_fc_replay, false);
+		sbi->s_mount_state |= EXT4_FC_REPLAY;
+
+		ext4_put_ea_inode(ea_inode);
+		ext4_fc_replay_cleanup(sb);
+
+		KUNIT_EXPECT_TRUE(test, READ_ONCE(ctx->ea_evicted));
+		KUNIT_EXPECT_TRUE(test,
+				  READ_ONCE(ctx->ea_evict_saw_fc_replay));
+		KUNIT_EXPECT_FALSE(test,
+				   !!(sbi->s_mount_state & EXT4_FC_REPLAY));
+		KUNIT_EXPECT_TRUE(test, llist_empty(&sbi->s_ea_inode_to_free));
+	}
 	memset(state, 0, sizeof(*state));
 }
 

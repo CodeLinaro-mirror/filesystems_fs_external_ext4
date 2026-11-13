@@ -2413,6 +2413,12 @@ void ext4_fc_replay_cleanup(struct super_block *sb)
 {
 	struct ext4_sb_info *sbi = EXT4_SB(sb);
 
+	/*
+	 * Drain any deferred EA inode iputs queued during fast commit replay
+	 * before clearing EXT4_FC_REPLAY and freeing replay state so that
+	 * ext4_evict_inode() -> ext4_free_inode() still sees EXT4_FC_REPLAY.
+	 */
+	flush_delayed_work(&sbi->s_ea_inode_work);
 	sbi->s_mount_state &= ~EXT4_FC_REPLAY;
 	kfree(sbi->s_fc_replay_state.fc_regions);
 	kfree(sbi->s_fc_replay_state.fc_modified_inodes);
