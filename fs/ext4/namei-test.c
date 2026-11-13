@@ -1252,6 +1252,9 @@ enum dx_probe_case_id {
 	DXP_BAD_ROOT_LIMIT,
 	DXP_ZERO_COUNT,
 	DXP_TREE_CYCLE,
+	DXP_NEXT_BAD_NODE_LIMIT,
+	DXP_NEXT_ZERO_COUNT,
+	DXP_NEXT_COUNT_EXCEEDS_LIMIT,
 };
 
 struct dx_probe_param {
@@ -1337,6 +1340,21 @@ static const struct dx_probe_param dx_probe_params[] = {
 		.id = DXP_TREE_CYCLE,
 		.expect_ok = false,
 	},
+	{
+		.desc = "ext4_htree_next_block rejects child node limit mismatch",
+		.id = DXP_NEXT_BAD_NODE_LIMIT,
+		.expect_ok = true,
+	},
+	{
+		.desc = "ext4_htree_next_block rejects child node count == 0",
+		.id = DXP_NEXT_ZERO_COUNT,
+		.expect_ok = true,
+	},
+	{
+		.desc = "ext4_htree_next_block rejects child node count > limit",
+		.id = DXP_NEXT_COUNT_EXCEEDS_LIMIT,
+		.expect_ok = true,
+	},
 };
 
 static void dx_probe_get_desc(const struct dx_probe_param *p, char *desc)
@@ -1401,7 +1419,12 @@ static void test_namei_check_dx_root_and_probe(struct kunit *test)
 							    TEST_BLK_SIZE);
 		break;
 	case DXP_VALID_2LEVEL_AND_NEXT:
+	case DXP_NEXT_BAD_NODE_LIMIT:
+	case DXP_NEXT_ZERO_COUNT:
+	case DXP_NEXT_COUNT_EXCEEDS_LIMIT:
+		dir->i_size = 5 * TEST_BLK_SIZE;
 		root->info.indirect_levels = 1;
+		dx_set_block(root->entries + 1, 4);
 		bh1 = map_and_get_dir_bh(ctx, dir, 1);
 		KUNIT_ASSERT_NOT_NULL(test, bh1);
 		node = (struct dx_node *)bh1->b_data;
@@ -1413,6 +1436,30 @@ static void test_namei_check_dx_root_and_probe(struct kunit *test)
 		/* Continuation hash (low bit 1) matching 0x40000000 */
 		dx_set_hash(node->entries + 1, 0x40000001U);
 		dx_set_block(node->entries + 1, 3);
+		if (p->id != DXP_VALID_2LEVEL_AND_NEXT) {
+			struct buffer_head *bh4;
+			struct dx_node *node2;
+
+			bh4 = map_and_get_dir_bh(ctx, dir, 4);
+			KUNIT_ASSERT_NOT_NULL(test, bh4);
+			node2 = (struct dx_node *)bh4->b_data;
+			node2->fake.rec_len = ext4_rec_len_to_disk(
+					TEST_BLK_SIZE, TEST_BLK_SIZE);
+			if (p->id == DXP_NEXT_BAD_NODE_LIMIT) {
+				dx_set_limit(node2->entries,
+					     dx_node_limit(dir) - 1);
+				dx_set_count(node2->entries, 1);
+			} else if (p->id == DXP_NEXT_ZERO_COUNT) {
+				dx_set_limit(node2->entries,
+					     dx_node_limit(dir));
+				dx_set_count(node2->entries, 0);
+			} else {
+				dx_set_limit(node2->entries,
+					     dx_node_limit(dir));
+				dx_set_count(node2->entries,
+					     dx_node_limit(dir) + 1);
+			}
+		}
 		break;
 	case DXP_DOT_BAD_NAMELEN:
 		root->dotdot.rec_len = ext4_rec_len_to_disk(12, TEST_BLK_SIZE);
@@ -1491,6 +1538,19 @@ static void test_namei_check_dx_root_and_probe(struct kunit *test)
 		KUNIT_EXPECT_EQ(test,
 			ext4_htree_next_block_test(dir, 0x40000000U, frame,
 						   frames, NULL), 0);
+	} else if (p->id == DXP_NEXT_BAD_NODE_LIMIT ||
+		   p->id == DXP_NEXT_ZERO_COUNT ||
+		   p->id == DXP_NEXT_COUNT_EXCEEDS_LIMIT) {
+		KUNIT_ASSERT_PTR_EQ(test, frame, &frames[1]);
+		/* First step stays in bh1 (entries[1]) */
+		KUNIT_ASSERT_EQ(test,
+			ext4_htree_next_block_test(dir, HASH_NB_ALWAYS, frame,
+						   frames, &start_hash), 1);
+		/* Next step descends into corrupt child dx_node at lblk 4 */
+		KUNIT_EXPECT_EQ(test,
+			ext4_htree_next_block_test(dir, HASH_NB_ALWAYS, frame,
+						   frames, &start_hash),
+			-EFSCORRUPTED);
 	}
 	dx_release_test(frames);
 }

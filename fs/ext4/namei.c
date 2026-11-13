@@ -608,6 +608,25 @@ static inline void htree_rep_invariant_check(struct dx_entry *at,
 }
 #endif /* DX_DEBUG */
 
+static bool dx_check_entries(struct inode *dir, struct dx_entry *entries,
+			     unsigned int expected_limit)
+{
+	unsigned int limit = dx_get_limit(entries);
+	unsigned int count = dx_get_count(entries);
+
+	if (limit != expected_limit) {
+		ext4_warning_inode(dir, "dx entry: limit %u != expected limit %u",
+				   limit, expected_limit);
+		return false;
+	}
+	if (!count || count > limit) {
+		ext4_warning_inode(dir, "dx entry: count %u beyond limit %u",
+				   count, limit);
+		return false;
+	}
+	return true;
+}
+
 /*
  * Probe for a directory leaf block to search.
  *
@@ -697,26 +716,15 @@ dx_probe(struct ext4_filename *fname, struct inode *dir,
 	entries = (struct dx_entry *)(((char *)&root->info) +
 				      root->info.info_length);
 
-	if (dx_get_limit(entries) != dx_root_limit(dir,
-						   root->info.info_length)) {
-		ext4_warning_inode(dir, "dx entry: limit %u != root limit %u",
-				   dx_get_limit(entries),
-				   dx_root_limit(dir, root->info.info_length));
+	if (!dx_check_entries(dir, entries,
+			      dx_root_limit(dir, root->info.info_length)))
 		goto fail;
-	}
 
 	dxtrace(printk("Look up %x", hash));
 	level = 0;
 	blocks[0] = 0;
 	while (1) {
 		count = dx_get_count(entries);
-		if (!count || count > dx_get_limit(entries)) {
-			ext4_warning_inode(dir,
-					   "dx entry: count %u beyond limit %u",
-					   count, dx_get_limit(entries));
-			goto fail;
-		}
-
 		p = entries + 1;
 		q = entries + count - 1;
 		while (p <= q) {
@@ -759,12 +767,8 @@ dx_probe(struct ext4_filename *fname, struct inode *dir,
 
 		entries = ((struct dx_node *) frame->bh->b_data)->entries;
 
-		if (dx_get_limit(entries) != dx_node_limit(dir)) {
-			ext4_warning_inode(dir,
-				"dx entry: limit %u != node limit %u",
-				dx_get_limit(entries), dx_node_limit(dir));
+		if (!dx_check_entries(dir, entries, dx_node_limit(dir)))
 			goto fail;
-		}
 	}
 fail:
 	while (frame >= frame_in) {
@@ -861,13 +865,20 @@ static int ext4_htree_next_block(struct inode *dir, __u32 hash,
 	 * block so no check is necessary
 	 */
 	while (num_frames--) {
+		struct dx_entry *entries;
+
 		bh = ext4_read_dirblock(dir, dx_get_block(p->at), INDEX);
 		if (IS_ERR(bh))
 			return PTR_ERR(bh);
+		entries = ((struct dx_node *)bh->b_data)->entries;
+		if (!dx_check_entries(dir, entries, dx_node_limit(dir))) {
+			brelse(bh);
+			return -EFSCORRUPTED;
+		}
 		p++;
 		brelse(p->bh);
 		p->bh = bh;
-		p->at = p->entries = ((struct dx_node *) bh->b_data)->entries;
+		p->at = p->entries = entries;
 	}
 	return 1;
 }
