@@ -3351,6 +3351,8 @@ struct buffer_head *ext4_sb_find_get_block(struct super_block *sb,
 					   ext4_fsblk_t block);
 struct buffer_head *ext4_sb_getblk_unmovable(struct super_block *sb,
 					     ext4_fsblk_t block);
+u64 ext4_fscrypt_limit_io_blocks(const struct inode *inode, u64 lblk,
+				 u64 nr_blocks);
 #if IS_ENABLED(CONFIG_EXT4_KUNIT_TESTS)
 int ext4_inode_csum_verify_test(struct inode *inode, struct ext4_inode *raw,
 				struct ext4_inode_info *ei);

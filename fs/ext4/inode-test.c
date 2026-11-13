@@ -366,6 +366,9 @@ struct inode_test_ctx {
 	unsigned int orphan_add_calls;
 	unsigned int orphan_del_calls;
 	unsigned int free_inode_calls;
+	u64 fscrypt_io_limit;
+	unsigned int fscrypt_limit_skip;
+	unsigned int fscrypt_limit_calls;
 };
 
 static unsigned long inode_test_shrinker_count(struct shrinker *shrink,
@@ -2896,6 +2899,24 @@ static void inode_test_get_block_bread_and_walk_buffers(struct kunit *test)
  * -------------------------------------------------------------------------
  */
 
+static u64 inode_test_fscrypt_limit_stub(const struct inode *inode, u64 lblk,
+					 u64 nr_blocks)
+{
+	struct kunit *test = kunit_get_current_test();
+	struct inode_test_ctx *ctx = test ? test->priv : NULL;
+
+	if (!ctx)
+		return nr_blocks;
+	ctx->fscrypt_limit_calls++;
+	if (ctx->fscrypt_limit_skip) {
+		ctx->fscrypt_limit_skip--;
+		return nr_blocks;
+	}
+	if (ctx->fscrypt_io_limit && nr_blocks > ctx->fscrypt_io_limit)
+		return ctx->fscrypt_io_limit;
+	return nr_blocks;
+}
+
 static void inode_test_iomap_and_atomic_writes(struct kunit *test)
 {
 	struct inode_test_ctx *ctx = inode_test_setup(test);
@@ -3039,6 +3060,51 @@ static void inode_test_iomap_and_atomic_writes(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, iomap.addr, (u64)INODE_TEST_DATA_BLK0 << 12);
 	KUNIT_EXPECT_TRUE(test, !!(iomap.flags & IOMAP_F_ATOMIC_BIO));
 	KUNIT_EXPECT_GT(test, ctx->zeroout_calls, 0U);
+
+	/*
+	 * 7. Atomic write truncated by fscrypt DUN wraparound returns -EINVAL
+	 * without triggering WARN_ON_ONCE(), both on the pre-allocation check
+	 * and on the post-mapping fallback check, while non-atomic I/O is
+	 * cleanly truncated to the limited block count.
+	 */
+	kunit_activate_static_stub(test, ext4_fscrypt_limit_io_blocks,
+				   inode_test_fscrypt_limit_stub);
+	inode_test_reset_mock_inode(ctx, S_IFREG | 0644);
+	inode->i_size = 16384;
+	inode_test_insert_leaf_extent(inode, 0, 2, INODE_TEST_DATA_BLK0, false);
+	ctx->next_alloc_pblk = INODE_TEST_DATA_BLK0 + 2;
+	ctx->alloc_calls = 0;
+	ctx->zeroout_calls = 0;
+	ctx->fscrypt_io_limit = 2;
+	ctx->fscrypt_limit_skip = 0;
+	ctx->fscrypt_limit_calls = 0;
+
+	err = ext4_iomap_begin(inode, 0, 16384,
+			       IOMAP_WRITE | IOMAP_DIRECT | IOMAP_ATOMIC,
+			       &iomap, &srcmap);
+	KUNIT_EXPECT_EQ(test, err, -EINVAL);
+	KUNIT_EXPECT_EQ(test, ctx->alloc_calls, 0U);
+	KUNIT_EXPECT_EQ(test, ctx->zeroout_calls, 0U);
+	KUNIT_EXPECT_EQ(test, ctx->fscrypt_limit_calls, 1U);
+
+	/* Skip the pre-alloc check to exercise the post-mapping check too */
+	ctx->fscrypt_limit_skip = 1;
+	ctx->fscrypt_limit_calls = 0;
+	err = ext4_iomap_begin(inode, 0, 16384,
+			       IOMAP_WRITE | IOMAP_DIRECT | IOMAP_ATOMIC,
+			       &iomap, &srcmap);
+	KUNIT_EXPECT_EQ(test, err, -EINVAL);
+	KUNIT_EXPECT_EQ(test, ctx->fscrypt_limit_calls, 2U);
+
+	/* Non-atomic mapping is truncated cleanly without error */
+	ctx->fscrypt_limit_skip = 0;
+	memset(&iomap, 0, sizeof(iomap));
+	err = ext4_iomap_begin(inode, 0, 16384, IOMAP_WRITE | IOMAP_DIRECT,
+			       &iomap, &srcmap);
+	KUNIT_EXPECT_EQ(test, err, 0);
+	KUNIT_EXPECT_EQ(test, iomap.length, 8192ULL);
+
+	kunit_deactivate_static_stub(test, ext4_fscrypt_limit_io_blocks);
 }
 
 /* -------------------------------------------------------------------------

@@ -1130,6 +1130,15 @@ struct buffer_head *ext4_sb_getblk_unmovable(struct super_block *sb,
 }
 EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_sb_getblk_unmovable);
 
+u64 ext4_fscrypt_limit_io_blocks(const struct inode *inode, u64 lblk,
+				 u64 nr_blocks)
+{
+	KUNIT_STATIC_STUB_REDIRECT(ext4_fscrypt_limit_io_blocks, inode, lblk,
+				   nr_blocks);
+	return fscrypt_limit_io_blocks(inode, lblk, nr_blocks);
+}
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_fscrypt_limit_io_blocks);
+
 /*
  * `handle' can be NULL if create is zero
  */
@@ -3982,6 +3991,16 @@ int ext4_iomap_begin(struct inode *inode, loff_t offset, loff_t length,
 			  EXT4_MAX_LOGICAL_BLOCK) - map.m_lblk + 1;
 	orig_mlen = map.m_len;
 
+	/*
+	 * Atomic writes must be issued as a single contiguous bio, so reject
+	 * requests that fscrypt would have to split across a DUN wraparound
+	 * before allocating blocks.
+	 */
+	if ((flags & IOMAP_ATOMIC) &&
+	    ext4_fscrypt_limit_io_blocks(inode, map.m_lblk, map.m_len) <
+	    map.m_len)
+		return -EINVAL;
+
 	if (flags & IOMAP_WRITE) {
 		/*
 		 * We check here if the blocks are already allocated, then we
@@ -4018,13 +4037,6 @@ int ext4_iomap_begin(struct inode *inode, loff_t offset, loff_t length,
 		return ret;
 out:
 	/*
-	 * Sometimes I/O to an encrypted file has to be broken up to guarantee
-	 * DUN contiguity.  Handle this by limiting the length of the mapping
-	 * returned.
-	 */
-	map.m_len = fscrypt_limit_io_blocks(inode, map.m_lblk, map.m_len);
-
-	/*
 	 * Before returning to iomap, let's ensure the allocated mapping
 	 * covers the entire requested length for atomic writes.
 	 */
@@ -4034,6 +4046,16 @@ out:
 			return -EINVAL;
 		}
 	}
+
+	/*
+	 * Sometimes I/O to an encrypted file has to be broken up to guarantee
+	 * DUN contiguity.  Handle this by limiting the length of the mapping
+	 * returned.
+	 */
+	map.m_len = ext4_fscrypt_limit_io_blocks(inode, map.m_lblk, map.m_len);
+	if ((flags & IOMAP_ATOMIC) && map.m_len < (length >> blkbits))
+		return -EINVAL;
+
 	ext4_set_iomap(inode, iomap, &map, offset, length, flags);
 
 	return 0;
