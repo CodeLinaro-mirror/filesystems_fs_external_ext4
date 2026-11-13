@@ -155,10 +155,13 @@ static struct file_system_type resize_test_fs_type = {
 	.kill_sb	 = kill_anon_super,
 };
 
-static void resize_init_mock_bh(struct buffer_head *bh, struct folio *folio,
+static void resize_init_mock_bh(struct buffer_head *bh,
+				struct block_device *bdev,
+				struct folio *folio,
 				u8 *data, size_t size, sector_t blocknr)
 {
 	memset(bh, 0, sizeof(*bh));
+	bh->b_bdev = bdev;
 	bh->b_folio = folio;
 	bh->b_data = (char *)data;
 	bh->b_size = size;
@@ -200,7 +203,7 @@ static struct buffer_head *resize_get_or_create_bh(struct resize_test_ctx *ctx,
 		return NULL;
 	}
 	blk->blocknr = blocknr;
-	resize_init_mock_bh(&blk->bh, ctx->bh_folio, blk->data,
+	resize_init_mock_bh(&blk->bh, &ctx->bdev, ctx->bh_folio, blk->data,
 			    RESIZE_TEST_BLK_SIZE, blocknr);
 	list_add_tail(&blk->node, &ctx->blks);
 	get_bh(&blk->bh);
@@ -734,8 +737,8 @@ static int resize_test_init(struct kunit *test)
 	ctx->es = (struct ext4_super_block *)sbh->b_data;
 	sbi->s_es = ctx->es;
 
-	resize_init_mock_bh(&ctx->iloc_bh, ctx->bh_folio, ctx->iloc_buf,
-			    RESIZE_TEST_BLK_SIZE, 99);
+	resize_init_mock_bh(&ctx->iloc_bh, &ctx->bdev, ctx->bh_folio,
+			    ctx->iloc_buf, RESIZE_TEST_BLK_SIZE, 99);
 
 	active_resize_test = test;
 	kunit_activate_static_stub(test, ext4_sb_getblk, resize_sb_getblk_stub);
