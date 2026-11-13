@@ -1785,6 +1785,21 @@ static void ialloc_test_find_group_other_flex_bg(struct kunit *test)
  * =========================================================================
  */
 
+/*
+ * Compute a non-zero on-disk i_dtime @age seconds before @now.
+ * On RTC-less VMs (e.g., QEMU arm64) ktime_get_real_seconds() starts at 0,
+ * so (now - age) can land on 0, which recently_deleted() treats as "never
+ * deleted".  Bumping age by 1s in that case keeps it in the same window.
+ */
+static __le32 ialloc_test_past_dtime(u32 now, u32 age)
+{
+	u32 dtime = now - age;
+
+	if (!dtime)
+		dtime--;
+	return cpu_to_le32(dtime);
+}
+
 static void ialloc_test_recently_deleted(struct kunit *test)
 {
 	struct ialloc_test_ctx *ctx = test->priv;
@@ -1809,7 +1824,7 @@ static void ialloc_test_recently_deleted(struct kunit *test)
 	raw = (struct ext4_inode *)(it_slot->cache_buf +
 				    2 * IALLOC_TEST_INODE_SIZE);
 	now = ktime_get_real_seconds();
-	raw->i_dtime = cpu_to_le32(now - 10);
+	raw->i_dtime = ialloc_test_past_dtime(now, 10);
 	KUNIT_EXPECT_EQ(test, ext4_recently_deleted_test(sb, 1, 2), 0);
 
 	/* 4. Cached but !buffer_uptodate -> returns 0 */
@@ -1824,16 +1839,16 @@ static void ialloc_test_recently_deleted(struct kunit *test)
 
 	/* 6. Clean buffer uses 60s window; dirty buffer extends to 360s */
 	now = ktime_get_real_seconds();
-	raw->i_dtime = cpu_to_le32(now - 20);
+	raw->i_dtime = ialloc_test_past_dtime(now, 20);
 	KUNIT_EXPECT_EQ(test, ext4_recently_deleted_test(sb, 1, 2), 1);
 
-	raw->i_dtime = cpu_to_le32(now - 120);
+	raw->i_dtime = ialloc_test_past_dtime(now, 120);
 	KUNIT_EXPECT_EQ(test, ext4_recently_deleted_test(sb, 1, 2), 0);
 
 	set_buffer_dirty(&it_slot->bh);
 	KUNIT_EXPECT_EQ(test, ext4_recently_deleted_test(sb, 1, 2), 1);
 
-	raw->i_dtime = cpu_to_le32(now - 400);
+	raw->i_dtime = ialloc_test_past_dtime(now, 400);
 	KUNIT_EXPECT_EQ(test, ext4_recently_deleted_test(sb, 1, 2), 0);
 	clear_buffer_dirty(&it_slot->bh);
 }
@@ -1861,7 +1876,7 @@ static void ialloc_test_find_inode_bit(struct kunit *test)
 					true, true);
 	KUNIT_ASSERT_NOT_NULL(test, it_slot);
 	raw1 = (struct ext4_inode *)(it_slot->cache_buf + IALLOC_TEST_INODE_SIZE);
-	raw1->i_dtime = cpu_to_le32((u32)ktime_get_real_seconds() - 10);
+	raw1->i_dtime = ialloc_test_past_dtime(ktime_get_real_seconds(), 10);
 
 	/* No-journal mode skips recently deleted bit 1 in favor of bit 6 */
 	ino = 0;
