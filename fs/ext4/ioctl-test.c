@@ -1140,8 +1140,8 @@ static void test_swap_inode_data_and_seed(struct kunit *test)
 	ei2->i_disksize = 0x22000;
 	i_size_write(inode1, 0x10500);
 	i_size_write(inode2, 0x20500);
-	inode_set_iversion_raw(inode1, 10);
-	inode_set_iversion_raw(inode2, 20);
+	inode_set_iversion_raw(inode1, 0x123456789abcdef0ULL);
+	inode_set_iversion_raw(inode2, 0xfedcba9876543210ULL);
 	inode_set_atime_to_ts(inode1, at1);
 	inode_set_atime_to_ts(inode2, at2);
 	inode_set_mtime_to_ts(inode1, mt1);
@@ -1164,8 +1164,10 @@ static void test_swap_inode_data_and_seed(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, ei2->i_disksize, (loff_t)0x11000);
 	KUNIT_EXPECT_EQ(test, i_size_read(inode1), (loff_t)0x20500);
 	KUNIT_EXPECT_EQ(test, i_size_read(inode2), (loff_t)0x10500);
-	KUNIT_EXPECT_EQ(test, inode_peek_iversion_raw(inode1), 20ULL);
-	KUNIT_EXPECT_EQ(test, inode_peek_iversion_raw(inode2), 10ULL);
+	KUNIT_EXPECT_EQ(test, inode_peek_iversion_raw(inode1),
+			0xfedcba9876543210ULL);
+	KUNIT_EXPECT_EQ(test, inode_peek_iversion_raw(inode2),
+			0x123456789abcdef0ULL);
 	KUNIT_EXPECT_EQ(test, inode_get_atime_sec(inode1), 2000LL);
 	KUNIT_EXPECT_EQ(test, inode_get_mtime_sec(inode1), 4000LL);
 	KUNIT_EXPECT_EQ(test, ei1->i_es_all_nr, 0U);
@@ -1181,6 +1183,10 @@ static void test_swap_inode_data_and_seed(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, ei2->i_flags, (u32)EXT4_NOATIME_FL);
 	KUNIT_EXPECT_EQ(test, ei1->i_disksize, (loff_t)0x11000);
 	KUNIT_EXPECT_EQ(test, i_size_read(inode1), (loff_t)0x10500);
+	KUNIT_EXPECT_EQ(test, inode_peek_iversion_raw(inode1),
+			0x123456789abcdef0ULL);
+	KUNIT_EXPECT_EQ(test, inode_peek_iversion_raw(inode2),
+			0xfedcba9876543210ULL);
 
 	/* ext4_reset_inode_seed with and without metadata_csum */
 	inode1->i_ino = 42;

@@ -331,11 +331,14 @@ static void swap_inode_data(struct inode *inode1, struct inode *inode2)
 	struct ext4_inode_info *ei2;
 	unsigned long tmp;
 	struct timespec64 ts1, ts2;
+	u64 iversion;
 
 	ei1 = EXT4_I(inode1);
 	ei2 = EXT4_I(inode2);
 
-	swap(inode1->i_version, inode2->i_version);
+	iversion = inode_peek_iversion_raw(inode1);
+	inode_set_iversion_raw(inode1, inode_peek_iversion_raw(inode2));
+	inode_set_iversion_raw(inode2, iversion);
 
 	ts1 = inode_get_atime(inode1);
 	ts2 = inode_get_atime(inode2);
