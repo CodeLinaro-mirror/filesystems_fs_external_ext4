@@ -880,7 +880,7 @@ ext4_ext_binsearch(struct inode *inode,
 
 }
 
-void ext4_ext_tree_init(handle_t *handle, struct inode *inode)
+void __ext4_ext_tree_init(struct inode *inode)
 {
 	struct ext4_extent_header *eh;
 
@@ -890,6 +890,11 @@ void ext4_ext_tree_init(handle_t *handle, struct inode *inode)
 	eh->eh_magic = EXT4_EXT_MAGIC;
 	eh->eh_max = cpu_to_le16(ext4_ext_space_root(inode, 0));
 	eh->eh_generation = 0;
+}
+
+void ext4_ext_tree_init(handle_t *handle, struct inode *inode)
+{
+	__ext4_ext_tree_init(inode);
 	ext4_mark_inode_dirty(handle, inode);
 }
 

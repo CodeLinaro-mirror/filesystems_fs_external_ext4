@@ -345,6 +345,14 @@ static int ext4_ext_swap_inode_data(handle_t *handle, struct inode *inode,
 	up_write(&EXT4_I(inode)->i_data_sem);
 
 	/*
+	 * Ownership of tmp_inode's extent tree has now moved to inode; clear
+	 * tmp_inode's in-memory block count and extent header immediately so
+	 * a subsequent failure cannot free inode's live extent index blocks.
+	 */
+	tmp_inode->i_blocks = 0;
+	__ext4_ext_tree_init(tmp_inode);
+
+	/*
 	 * We mark the inode dirty after, because we decrement the
 	 * i_blocks when freeing the indirect meta-data blocks
 	 */
@@ -573,34 +581,35 @@ err_out:
 			free_ext_block(handle, tmp_inode);
 	}
 
-	/* We mark the tmp_inode dirty via ext4_ext_tree_init. */
+	/*
+	 * Always clear tmp_inode's in-memory size, block count, checksum seed,
+	 * and extent header before ensuring journal credits: even if extending
+	 * the transaction fails, iput(tmp_inode) -> ext4_evict_inode() must
+	 * not see or truncate the original inode's live blocks.
+	 *
+	 * We don't need to take the i_lock because the inode is not visible to
+	 * user space.
+	 */
+	i_size_write(tmp_inode, 0);
+	tmp_inode->i_blocks = 0;
+	EXT4_I(tmp_inode)->i_csum_seed = tmp_csum_seed;
+	__ext4_ext_tree_init(tmp_inode);
+
+	/* We mark the tmp_inode dirty below once credits are ensured. */
 	err = ext4_journal_ensure_credits(handle, 1, 0);
 	if (err < 0) {
 		if (!retval)
 			retval = err;
 		goto out_stop;
 	}
-	/*
-	 * Mark the tmp_inode as of size zero
-	 */
-	i_size_write(tmp_inode, 0);
 
-	/*
-	 * set the  i_blocks count to zero
-	 * so that the ext4_evict_inode() does the
-	 * right job
-	 *
-	 * We don't need to take the i_lock because
-	 * the inode is not visible to user space.
-	 */
-	tmp_inode->i_blocks = 0;
-	EXT4_I(tmp_inode)->i_csum_seed = tmp_csum_seed;
-
-	/* Reset the extent details */
-	ext4_ext_tree_init(handle, tmp_inode);
+	/* Reset the extent details on disk */
+	ext4_mark_inode_dirty(handle, tmp_inode);
 out_stop:
 	ext4_journal_stop(handle);
 out_tmp_inode:
+	i_size_write(tmp_inode, 0);
+	EXT4_I(tmp_inode)->i_csum_seed = tmp_csum_seed;
 	unlock_new_inode(tmp_inode);
 out_unlock:
 	ext4_writepages_up_write(inode->i_sb, alloc_ctx);
