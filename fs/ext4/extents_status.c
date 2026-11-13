@@ -1765,6 +1765,7 @@ retry:
 
 out:
 	scan_time = ktime_to_ns(ktime_sub(ktime_get(), start_time));
+	spin_lock(&sbi->s_es_lock);
 	if (likely(es_stats->es_stats_scan_time))
 		es_stats->es_stats_scan_time = (scan_time +
 				es_stats->es_stats_scan_time*3) / 4;
@@ -1777,6 +1778,7 @@ out:
 				es_stats->es_stats_shrunk*3) / 4;
 	else
 		es_stats->es_stats_shrunk = nr_shrunk;
+	spin_unlock(&sbi->s_es_lock);
 
 	trace_ext4_es_shrink(sbi->s_sb, nr_shrunk, scan_time,
 			     nr_skipped, retried);
@@ -1818,6 +1820,9 @@ int ext4_seq_es_shrinker_info_show(struct seq_file *seq, void *v)
 	struct ext4_es_stats *es_stats = &sbi->s_es_stats;
 	struct ext4_inode_info *ei, *max = NULL;
 	unsigned int inode_cnt = 0;
+	unsigned int max_all_nr = 0, max_shk_nr = 0;
+	unsigned long shrunk;
+	u64 scan_time, max_scan_time, max_ino = 0;
 
 	if (v != SEQ_START_TOKEN)
 		return 0;
@@ -1831,6 +1836,14 @@ int ext4_seq_es_shrinker_info_show(struct seq_file *seq, void *v)
 		else if (!max)
 			max = ei;
 	}
+	if (max) {
+		max_ino = max->vfs_inode.i_ino;
+		max_all_nr = max->i_es_all_nr;
+		max_shk_nr = max->i_es_shk_nr;
+	}
+	scan_time = es_stats->es_stats_scan_time;
+	shrunk = es_stats->es_stats_shrunk;
+	max_scan_time = es_stats->es_stats_max_scan_time;
 	spin_unlock(&sbi->s_es_lock);
 
 	seq_printf(seq, "stats:\n  %lld objects\n  %lld reclaimable objects\n",
@@ -1843,14 +1856,14 @@ int ext4_seq_es_shrinker_info_show(struct seq_file *seq, void *v)
 		seq_printf(seq, "  %d inodes on list\n", inode_cnt);
 
 	seq_printf(seq, "average:\n  %llu us scan time\n",
-	    div_u64(es_stats->es_stats_scan_time, 1000));
-	seq_printf(seq, "  %lu shrunk objects\n", es_stats->es_stats_shrunk);
+	    div_u64(scan_time, 1000));
+	seq_printf(seq, "  %lu shrunk objects\n", shrunk);
 	if (inode_cnt)
 		seq_printf(seq,
 		    "maximum:\n  %llu inode (%u objects, %u reclaimable)\n"
 		    "  %llu us max scan time\n",
-		    max->vfs_inode.i_ino, max->i_es_all_nr, max->i_es_shk_nr,
-		    div_u64(es_stats->es_stats_max_scan_time, 1000));
+		    max_ino, max_all_nr, max_shk_nr,
+		    div_u64(max_scan_time, 1000));
 
 	return 0;
 }

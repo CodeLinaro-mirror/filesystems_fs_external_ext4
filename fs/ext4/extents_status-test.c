@@ -1594,10 +1594,30 @@ static void test_es_seq_shrinker_info_show_formats_stats(struct kunit *test)
 {
 	struct es_test_ctx *ctx = test->priv;
 	struct inode *inode = &ctx->ei->vfs_inode;
+	struct shrink_control sc = {};
 	struct seq_file seq = {};
 	char *buf;
 
+	/* Empty-list scan exercises the early goto-out stats lock path */
+	sc.nr_to_scan = 4;
+	KUNIT_EXPECT_EQ(test, es_shrinker_scan(ctx, &sc), 0UL);
+
+	/* Populate extents and run two scans to exercise both EWMA branches */
 	es_insert_extent(inode, 10, 2, 100, EXTENT_STATUS_WRITTEN, false);
+	es_insert_extent(inode, 20, 2, 200, EXTENT_STATUS_WRITTEN, false);
+	es_insert_extent(inode, 30, 2, 300, EXTENT_STATUS_WRITTEN, false);
+	es_insert_extent(inode, 40, 2, 400, EXTENT_STATUS_WRITTEN, false);
+	es_insert_extent(inode, 50, 2, 500, EXTENT_STATUS_WRITTEN, false);
+
+	/* First scan hits nr_to_scan <= 0 goto-out path (shrunk = 2) */
+	sc.nr_to_scan = 2;
+	KUNIT_EXPECT_EQ(test, es_shrinker_scan(ctx, &sc), 2UL);
+	KUNIT_EXPECT_EQ(test, ctx->sbi->s_es_stats.es_stats_shrunk, 2UL);
+
+	/* Second scan exercises EWMA update: (1 + 2 * 3) / 4 == 1 */
+	sc.nr_to_scan = 1;
+	KUNIT_EXPECT_EQ(test, es_shrinker_scan(ctx, &sc), 1UL);
+	KUNIT_EXPECT_EQ(test, ctx->sbi->s_es_stats.es_stats_shrunk, 1UL);
 
 	buf = kunit_kzalloc(test, PAGE_SIZE, GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, buf);
@@ -1610,6 +1630,9 @@ static void test_es_seq_shrinker_info_show_formats_stats(struct kunit *test)
 			0);
 	KUNIT_EXPECT_GT(test, seq.count, 0UL);
 	KUNIT_EXPECT_NOT_NULL(test, strstr(buf, "reclaimable objects"));
+	KUNIT_EXPECT_NOT_NULL(test, strstr(buf, "1 inodes on list"));
+	KUNIT_EXPECT_NOT_NULL(test, strstr(buf, "1 shrunk objects"));
+	KUNIT_EXPECT_NOT_NULL(test, strstr(buf, "max scan time"));
 }
 
 static struct kunit_case extents_status_test_cases[] = {
