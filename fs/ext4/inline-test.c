@@ -63,6 +63,12 @@ struct inline_test_ctx {
 	int da_get_block_prep_err;
 	int journal_mode;
 	bool es_stats_inited;
+	bool dirty_data_bh_seen;
+	bool dirty_data_bh_locked;
+	bool dirty_data_bh_uptodate;
+	bool dirty_data_bh_verified;
+	int dirty_data_bh_csum_ok;
+	loff_t dirty_data_bh_isize;
 };
 
 static struct inline_test_ctx *t_ctx;
@@ -110,6 +116,15 @@ static int stub_handle_dirty_metadata(const char *where, unsigned int line,
 				      handle_t *handle, struct inode *inode,
 				      struct buffer_head *bh)
 {
+	if (bh == &t_ctx->data_bh && inode && S_ISDIR(inode->i_mode)) {
+		t_ctx->dirty_data_bh_seen = true;
+		t_ctx->dirty_data_bh_locked = buffer_locked(bh);
+		t_ctx->dirty_data_bh_uptodate = buffer_uptodate(bh);
+		t_ctx->dirty_data_bh_verified = buffer_verified(bh);
+		t_ctx->dirty_data_bh_csum_ok =
+			ext4_dirblock_csum_verify(inode, bh);
+		t_ctx->dirty_data_bh_isize = i_size_read(inode);
+	}
 	t_ctx->dirty_metadata_calls++;
 	if (t_ctx->dirty_metadata_fail_on_call > 0 &&
 	    t_ctx->dirty_metadata_calls == t_ctx->dirty_metadata_fail_on_call)
@@ -1858,15 +1873,57 @@ static void test_inline_dir_conversion_and_corruptions(struct kunit *test)
 	 * 2. Successful conversion of full inline directory to a normal
 	 * 1024-byte directory block -> ext4_try_add_inline_entry returns 0
 	 * and data_block_buf starts with "." and ".." followed by copied entries.
+	 * Verify checksum, uptodate, and verified flags are already set while
+	 * data_bh is unlocked and before i_size is raised to blocksize, and
+	 * that a dirty-metadata error does not leave i_size bumped.
 	 */
-	memset(ctx->data_block_buf, 0, sizeof(ctx->data_block_buf));
-	handle = ext4_journal_start(dir, EXT4_HT_DIR, 1);
-	KUNIT_ASSERT_FALSE(test, IS_ERR(handle));
-	ret = ext4_try_add_inline_entry(handle, &env->fname, dir, &env->child);
-	ext4_journal_stop(handle);
-	KUNIT_EXPECT_EQ(test, ret, 0);
-	KUNIT_EXPECT_FALSE(test, ext4_has_inline_data(dir));
-	KUNIT_EXPECT_EQ(test, i_size_read(dir), (loff_t)TEST_BLOCK_SIZE);
+	{
+		loff_t old_isize = i_size_read(dir);
+
+		ctx->es.s_feature_ro_compat |=
+			cpu_to_le32(EXT4_FEATURE_RO_COMPAT_METADATA_CSUM);
+
+		clear_buffer_uptodate(&ctx->data_bh);
+		clear_buffer_verified(&ctx->data_bh);
+		ctx->dirty_data_bh_seen = false;
+		ctx->dirty_metadata_err = -EIO;
+		ctx->dirty_metadata_fail_on_call = 0;
+		handle = ext4_journal_start(dir, EXT4_HT_DIR, 1);
+		KUNIT_ASSERT_FALSE(test, IS_ERR(handle));
+		ret = ext4_try_add_inline_entry(handle, &env->fname, dir,
+						&env->child);
+		ext4_journal_stop(handle);
+		ctx->dirty_metadata_err = 0;
+		KUNIT_EXPECT_EQ(test, ret, -EIO);
+		KUNIT_EXPECT_TRUE(test, ext4_has_inline_data(dir));
+		KUNIT_EXPECT_EQ(test, i_size_read(dir), old_isize);
+		KUNIT_EXPECT_EQ(test, ctx->ei.i_disksize, old_isize);
+
+		memset(ctx->data_block_buf, 0, sizeof(ctx->data_block_buf));
+		clear_buffer_uptodate(&ctx->data_bh);
+		clear_buffer_verified(&ctx->data_bh);
+		ctx->dirty_data_bh_seen = false;
+		handle = ext4_journal_start(dir, EXT4_HT_DIR, 1);
+		KUNIT_ASSERT_FALSE(test, IS_ERR(handle));
+		ret = ext4_try_add_inline_entry(handle, &env->fname, dir,
+						&env->child);
+		ext4_journal_stop(handle);
+		KUNIT_EXPECT_EQ(test, ret, 0);
+		KUNIT_EXPECT_FALSE(test, ext4_has_inline_data(dir));
+		KUNIT_EXPECT_TRUE(test, ctx->dirty_data_bh_seen);
+		KUNIT_EXPECT_FALSE(test, ctx->dirty_data_bh_locked);
+		KUNIT_EXPECT_TRUE(test, ctx->dirty_data_bh_uptodate);
+		KUNIT_EXPECT_TRUE(test, ctx->dirty_data_bh_verified);
+		KUNIT_EXPECT_EQ(test, ctx->dirty_data_bh_csum_ok, 1);
+		KUNIT_EXPECT_EQ(test, ctx->dirty_data_bh_isize, old_isize);
+		KUNIT_EXPECT_EQ(test, i_size_read(dir),
+				(loff_t)TEST_BLOCK_SIZE);
+		KUNIT_EXPECT_EQ(test, ctx->ei.i_disksize,
+				(loff_t)TEST_BLOCK_SIZE);
+
+		ctx->es.s_feature_ro_compat &=
+			~cpu_to_le32(EXT4_FEATURE_RO_COMPAT_METADATA_CSUM);
+	}
 
 	/* Verify "." and ".." headers in converted block */
 	de = (struct ext4_dir_entry_2 *)ctx->data_block_buf;

@@ -2779,9 +2779,9 @@ err_unlock_inode:
 	return err;
 }
 
-int ext4_init_dirblock(handle_t *handle, struct inode *inode,
-		       struct buffer_head *bh, unsigned int parent_ino,
-		       void *inline_buf, int inline_size)
+void ext4_init_dirblock_bh(struct inode *inode, struct buffer_head *bh,
+			   unsigned int parent_ino, void *inline_buf,
+			   int inline_size)
 {
 	struct ext4_dir_entry_2 *de = (struct ext4_dir_entry_2 *) bh->b_data;
 	size_t			blocksize = bh->b_size;
@@ -2819,10 +2819,18 @@ int ext4_init_dirblock(handle_t *handle, struct inode *inode,
 
 	if (csum_size)
 		ext4_initialize_dirent_tail(bh, blocksize);
-	BUFFER_TRACE(dir_block, "call ext4_handle_dirty_metadata");
+	ext4_dirblock_csum_set(inode, bh);
 	set_buffer_uptodate(bh);
 	set_buffer_verified(bh);
-	return ext4_handle_dirty_dirblock(handle, inode, bh);
+}
+
+int ext4_init_dirblock(handle_t *handle, struct inode *inode,
+		       struct buffer_head *bh, unsigned int parent_ino,
+		       void *inline_buf, int inline_size)
+{
+	ext4_init_dirblock_bh(inode, bh, parent_ino, inline_buf, inline_size);
+	BUFFER_TRACE(bh, "call ext4_handle_dirty_metadata");
+	return ext4_handle_dirty_metadata(handle, inode, bh);
 }
 EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_init_dirblock);
 

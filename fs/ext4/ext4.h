@@ -4122,6 +4122,9 @@ static inline int ext4_has_inline_data(struct inode *inode)
 extern const struct inode_operations ext4_dir_inode_operations;
 extern const struct inode_operations ext4_special_inode_operations;
 extern struct dentry *ext4_get_parent(struct dentry *child);
+extern void ext4_init_dirblock_bh(struct inode *inode, struct buffer_head *bh,
+				  unsigned int parent_ino, void *inline_buf,
+				  int inline_size);
 extern int ext4_init_dirblock(handle_t *handle, struct inode *inode,
 			      struct buffer_head *dir_block,
 			      unsigned int parent_ino, void *inline_buf,

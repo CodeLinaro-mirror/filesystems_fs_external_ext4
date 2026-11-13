@@ -1175,17 +1175,24 @@ static int ext4_convert_inline_data_nolock(handle_t *handle,
 		error = ext4_handle_dirty_metadata(handle,
 						   inode, data_bh);
 	} else {
-		unlock_buffer(data_bh);
-		inode->i_size = inode->i_sb->s_blocksize;
-		i_size_write(inode, inode->i_sb->s_blocksize);
-		EXT4_I(inode)->i_disksize = inode->i_sb->s_blocksize;
+		loff_t old_size = i_size_read(inode);
+		loff_t old_disksize = EXT4_I(inode)->i_disksize;
 
-		error = ext4_init_dirblock(handle, inode, data_bh,
+		ext4_init_dirblock_bh(inode, data_bh,
 			  le32_to_cpu(((struct ext4_dir_entry_2 *)buf)->inode),
 			  buf + EXT4_INLINE_DOTDOT_SIZE,
 			  inline_size - EXT4_INLINE_DOTDOT_SIZE);
-		if (!error)
+		unlock_buffer(data_bh);
+		error = ext4_handle_dirty_metadata(handle, inode, data_bh);
+		if (!error) {
+			i_size_write(inode, inode->i_sb->s_blocksize);
+			EXT4_I(inode)->i_disksize = inode->i_sb->s_blocksize;
 			error = ext4_mark_inode_dirty(handle, inode);
+			if (error) {
+				i_size_write(inode, old_size);
+				EXT4_I(inode)->i_disksize = old_disksize;
+			}
+		}
 	}
 
 out_restore:
