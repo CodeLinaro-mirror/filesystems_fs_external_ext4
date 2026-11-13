@@ -1541,7 +1541,7 @@ int ext4_itable_zeroout(struct super_block *sb, ext4_fsblk_t blk, int num,
 	if (ret < 0)
 		return ret;
 	if (barrier)
-		blkdev_issue_flush(sb->s_bdev);
+		ret = blkdev_issue_flush(sb->s_bdev);
 	return ret;
 }
 EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_itable_zeroout);

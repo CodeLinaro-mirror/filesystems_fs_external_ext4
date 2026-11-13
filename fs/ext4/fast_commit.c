@@ -668,10 +668,10 @@ int ext4_fc_get_buf(journal_t *journal, struct buffer_head **bh)
 	return jbd2_fc_get_buf(journal, bh);
 }
 
-void ext4_fc_issue_flush(struct block_device *bdev)
+int ext4_fc_issue_flush(struct block_device *bdev)
 {
 	KUNIT_STATIC_STUB_REDIRECT(ext4_fc_issue_flush, bdev);
-	blkdev_issue_flush(bdev);
+	return blkdev_issue_flush(bdev);
 }
 
 void ext4_fc_submit_bh(struct super_block *sb, bool is_tail)
@@ -1440,8 +1440,11 @@ static int ext4_fc_perform_commit(journal_t *journal, tid_t commit_tid)
 	 * Step 5: If file system device is different from journal device,
 	 * issue a cache flush before we start writing fast commit blocks.
 	 */
-	if (journal->j_fs_dev != journal->j_dev)
-		ext4_fc_issue_flush(journal->j_fs_dev);
+	if (journal->j_fs_dev != journal->j_dev) {
+		ret = ext4_fc_issue_flush(journal->j_fs_dev);
+		if (ret)
+			return ret;
+	}
 
 	blk_start_plug(&plug);
 	alloc_ctx = ext4_fc_lock(sb);
@@ -2031,7 +2034,7 @@ out_brelse:
 out:
 	iput(inode);
 	if (!ret)
-		ext4_fc_issue_flush(sb->s_bdev);
+		ret = ext4_fc_issue_flush(sb->s_bdev);
 
 	return ret;
 }

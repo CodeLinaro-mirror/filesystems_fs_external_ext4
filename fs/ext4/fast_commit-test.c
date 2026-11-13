@@ -117,6 +117,7 @@ struct fc_test_ctx {
 	int fail_fc_get_buf_on_call;
 	int fc_get_buf_calls;
 	bool fail_fc_wait_bufs;
+	int fail_fc_flush;
 	int submit_inode_data_err;
 
 	unsigned int fc_submit_bh_calls;
@@ -787,13 +788,14 @@ static void stub_fc_submit_bh(struct super_block *sb, bool is_tail)
 	EXT4_SB(sb)->s_fc_bh = NULL;
 }
 
-static void stub_fc_issue_flush(struct block_device *bdev)
+static int stub_fc_issue_flush(struct block_device *bdev)
 {
 	struct kunit *test = kunit_get_current_test();
 	struct fc_test_ctx *ctx = test->priv;
 
 	ctx->fc_flush_calls++;
 	ctx->last_flushed_bdev = bdev;
+	return ctx->fail_fc_flush;
 }
 
 static int mock_submit_inode_data_buffers(struct jbd2_inode *jinode)
@@ -1991,6 +1993,21 @@ static void test_fc_commit_paths(struct kunit *test)
 	memcpy(&tl, ctx->fc_buf_data[1], EXT4_FC_TAG_BASE_LEN);
 	KUNIT_EXPECT_EQ(test, le16_to_cpu(tl.fc_tag), (u16)EXT4_FC_TAG_INODE);
 
+	/* External journal flush failure falls back to full commit */
+	{
+		unsigned int failed_before = sbi->s_fc_stats.fc_failed_commits;
+
+		ctx->fail_fc_flush = -EIO;
+		ctx->fc_submit_bh_calls = 0;
+		ext4_fc_track_inode(&ctx->handle, file1);
+		KUNIT_EXPECT_EQ(test, ext4_fc_commit(&ctx->journal, 10), 0);
+		KUNIT_EXPECT_EQ(test, atomic_read(&sbi->s_fc_subtid), 2);
+		KUNIT_EXPECT_EQ(test, ctx->fc_submit_bh_calls, 0U);
+		KUNIT_EXPECT_EQ(test, sbi->s_fc_stats.fc_failed_commits,
+				failed_before + 1);
+		ctx->fail_fc_flush = 0;
+	}
+
 	ctx->journal.j_fs_dev = &ctx->bdev;
 }
 
@@ -2442,6 +2459,16 @@ static void test_fc_replay_inode_and_dentries(struct kunit *test)
 		KUNIT_EXPECT_EQ(test, le32_to_cpu(de->inode),
 				(u32)TEST_FILE2_INO);
 		brelse(bh);
+
+		/* 3) Flush failure during INODE replay propagates -EIO */
+		sbi->s_fc_replay_state.fc_replay_num_tags = 5;
+		ctx->fail_fc_flush = -EIO;
+		KUNIT_EXPECT_EQ(test,
+				ext4_fc_replay_test(&ctx->journal,
+						    &ctx->fc_bhs[0],
+						    PASS_REPLAY, 0, 10),
+				-EIO);
+		ctx->fail_fc_flush = 0;
 	}
 
 	ext4_fc_replay_cleanup(sb);

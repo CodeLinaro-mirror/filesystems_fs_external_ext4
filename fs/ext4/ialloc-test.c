@@ -2663,12 +2663,13 @@ static void ialloc_test_init_inode_table(struct kunit *test)
 			   !!(le16_to_cpu(ctx->gdps[0].bg_flags) &
 			      EXT4_BG_INODE_ZEROED));
 
-	/* 7. Zeroout I/O failure (-EIO) and emergency RO (-EROFS) */
+	/* 7. Zeroout/flush I/O failure (-EIO) and emergency RO (-EROFS) */
 	ctx->gdps[3].bg_flags = cpu_to_le16(EXT4_BG_INODE_UNINIT);
 	ctx->fail_itable_zeroout_err = -EIO;
-	err = ext4_init_inode_table(sb, 3, 0);
+	err = ext4_init_inode_table(sb, 3, 1);
 	ctx->fail_itable_zeroout_err = 0;
 	KUNIT_EXPECT_EQ(test, err, -EIO);
+	KUNIT_EXPECT_EQ(test, ctx->last_zeroout_barrier, 1);
 	KUNIT_EXPECT_FALSE(test,
 			   !!(le16_to_cpu(ctx->gdps[3].bg_flags) &
 			      EXT4_BG_INODE_ZEROED));

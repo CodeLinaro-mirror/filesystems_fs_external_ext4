@@ -3152,7 +3152,7 @@ int ext4_xattr_credits_for_new_inode_test(struct inode *dir, mode_t mode,
 /* fast_commit.c */
 int ext4_fc_get_buf(journal_t *journal, struct buffer_head **bh);
 void ext4_fc_submit_bh(struct super_block *sb, bool is_tail);
-void ext4_fc_issue_flush(struct block_device *bdev);
+int ext4_fc_issue_flush(struct block_device *bdev);
 int ext4_fc_info_show(struct seq_file *seq, void *v);
 void ext4_fc_init(struct super_block *sb, journal_t *journal);
 void ext4_fc_init_inode(struct inode *inode);
