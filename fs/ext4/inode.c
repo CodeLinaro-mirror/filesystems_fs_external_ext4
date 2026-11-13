@@ -6982,6 +6982,28 @@ static inline void ext4_set_inode_size(struct inode *inode, loff_t newsize)
 	up_write(&EXT4_I(inode)->i_data_sem);
 }
 
+static void ext4_zero_eof_folio_tail(struct inode *inode, loff_t from,
+				     loff_t to)
+{
+	struct folio *folio;
+
+	if (IS_DAX(inode) || from >= to)
+		return;
+	folio = filemap_lock_folio(inode->i_mapping, from >> PAGE_SHIFT);
+	if (IS_ERR(folio))
+		return;
+	if (folio_test_dirty(folio) && from > folio_pos(folio)) {
+		size_t offset = from - folio_pos(folio);
+		size_t end = min_t(loff_t, to - folio_pos(folio),
+				   folio_size(folio));
+
+		if (offset < end)
+			folio_zero_segment(folio, offset, end);
+	}
+	folio_unlock(folio);
+	folio_put(folio);
+}
+
 static int ext4_truncate_up(struct inode *inode, loff_t oldsize, loff_t newsize)
 {
 	ext4_lblk_t old_lblk, new_lblk;
@@ -7000,6 +7022,12 @@ static int ext4_truncate_up(struct inode *inode, loff_t oldsize, loff_t newsize)
 		if (ret)
 			return ret;
 	}
+	/*
+	 * Zero any dirty post-EOF bytes in the tail folio before publishing
+	 * the larger i_size so concurrent readers cannot observe stale
+	 * pagecache data before pagecache_isize_extended().
+	 */
+	ext4_zero_eof_folio_tail(inode, oldsize, newsize);
 
 	handle = ext4_journal_start(inode, EXT4_HT_INODE, 3);
 	if (IS_ERR(handle))

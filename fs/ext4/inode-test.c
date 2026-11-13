@@ -3544,6 +3544,36 @@ static void inode_test_buffered_write_and_folio_ops(struct kunit *test)
  * -------------------------------------------------------------------------
  */
 
+struct setattr_dirty_snap {
+	bool seen;
+	loff_t isize;
+	u8 pre_eof_byte;
+	u8 post_eof_start_byte;
+	u8 post_eof_end_byte;
+};
+
+static struct setattr_dirty_snap setattr_snap;
+
+static int inode_test_setattr_dirty_stub(handle_t *handle, struct inode *inode,
+					 const char *func, unsigned int line)
+{
+	struct folio *folio;
+	u8 *kaddr;
+
+	setattr_snap.seen = true;
+	setattr_snap.isize = i_size_read(inode);
+	folio = filemap_get_folio(inode->i_mapping, 0);
+	if (!IS_ERR(folio)) {
+		kaddr = kmap_local_folio(folio, 0);
+		setattr_snap.pre_eof_byte = kaddr[1023];
+		setattr_snap.post_eof_start_byte = kaddr[1024];
+		setattr_snap.post_eof_end_byte = kaddr[PAGE_SIZE - 1];
+		kunmap_local(kaddr);
+		folio_put(folio);
+	}
+	return 0;
+}
+
 static void inode_test_setattr(struct kunit *test)
 {
 	struct inode_test_ctx *ctx = inode_test_setup(test);
@@ -3641,6 +3671,51 @@ static void inode_test_setattr(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, inode->i_size, 4096LL);
 	KUNIT_EXPECT_EQ(test, ctx->ei.i_disksize, 4096LL);
 	KUNIT_EXPECT_EQ(test, ctx->total_freed_blocks, 1UL);
+
+	/*
+	 * 6. Sub-page blocksize (1024 < PAGE_SIZE) extending truncate from
+	 *    block-aligned oldsize = 1024 to PAGE_SIZE must zero dirty post-EOF
+	 *    bytes in the tail folio BEFORE i_size is raised and marked dirty.
+	 */
+	inode_test_reset_mock_inode(ctx, S_IFREG | 0644);
+	ctx->sb->s_blocksize = 1024;
+	ctx->sb->s_blocksize_bits = 10;
+	inode->i_blkbits = 10;
+	inode->i_size = 1024;
+	ctx->ei.i_disksize = 1024;
+
+	folio = filemap_grab_folio(inode->i_mapping, 0);
+	KUNIT_ASSERT_FALSE(test, IS_ERR(folio));
+	create_empty_buffers(folio, 1024, 0);
+	kaddr = kmap_local_folio(folio, 0);
+	memset(kaddr, 0x55, 1024);
+	memset(kaddr + 1024, 0xaa, PAGE_SIZE - 1024);
+	kunmap_local(kaddr);
+	folio_mark_uptodate(folio);
+	folio_mark_dirty(folio);
+	folio_unlock(folio);
+	folio_put(folio);
+
+	memset(&setattr_snap, 0, sizeof(setattr_snap));
+	kunit_activate_static_stub(test, __ext4_mark_inode_dirty,
+				   inode_test_setattr_dirty_stub);
+	attr = (struct iattr){ .ia_valid = ATTR_SIZE, .ia_size = PAGE_SIZE };
+	inode_lock(inode);
+	err = ext4_setattr(&nop_mnt_idmap, &dentry, &attr);
+	inode_unlock(inode);
+	kunit_deactivate_static_stub(test, __ext4_mark_inode_dirty);
+
+	KUNIT_ASSERT_EQ(test, err, 0);
+	KUNIT_ASSERT_TRUE(test, setattr_snap.seen);
+	KUNIT_EXPECT_EQ(test, setattr_snap.isize, (loff_t)PAGE_SIZE);
+	KUNIT_EXPECT_EQ(test, setattr_snap.pre_eof_byte, (u8)0x55);
+	KUNIT_EXPECT_EQ(test, setattr_snap.post_eof_start_byte, (u8)0x00);
+	KUNIT_EXPECT_EQ(test, setattr_snap.post_eof_end_byte, (u8)0x00);
+
+	truncate_inode_pages_final(inode->i_mapping);
+	ctx->sb->s_blocksize = INODE_TEST_BLK_SIZE;
+	ctx->sb->s_blocksize_bits = INODE_TEST_BLK_BITS;
+	inode->i_blkbits = INODE_TEST_BLK_BITS;
 }
 
 /* -------------------------------------------------------------------------
